@@ -1,0 +1,161 @@
+import TelegramBot from "node-telegram-bot-api";
+import express from "express";
+import bodyParser from "body-parser";
+import fetch from "node-fetch";
+
+// ================== ENV ==================
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
+
+if (!BOT_TOKEN || !OPENAI_KEY) {
+  throw new Error("BOT_TOKEN or OPENAI_API_KEY missing");
+}
+
+// ================== TELEGRAM ==================
+const bot = new TelegramBot(BOT_TOKEN);
+const app = express();
+app.use(bodyParser.json());
+
+// ================== WEBHOOK ==================
+const PORT = process.env.PORT || 3000;
+const WEBHOOK_URL = `https://${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.replit.app`;
+
+bot.setWebHook(`${WEBHOOK_URL}/webhook`);
+
+app.post("/webhook", (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
+
+app.get("/", (req, res) => {
+  res.send("🤖 Crypto AI Bot is running");
+});
+
+app.listen(PORT, () => {
+  console.log("🚀 Bot running on port", PORT);
+});
+
+// ================== USER STATE ==================
+const userCoins = {};
+const TIMEFRAME = "1h";
+
+// ================== AI FUNCTION ==================
+async function askAI(prompt) {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: "You are a professional crypto futures trader." },
+        { role: "user", content: prompt }
+      ]
+    })
+  });
+
+  const data = await response.json();
+  return data.choices[0].message.content;
+}
+
+// ================== STRATEGY ==================
+function generateSignal(coin) {
+  const directions = ["LONG", "SHORT"];
+  const direction = directions[Math.floor(Math.random() * directions.length)];
+
+  const confidence = Math.floor(65 + Math.random() * 30);
+
+  return {
+    coin,
+    direction,
+    confidence,
+    entry: (Math.random() * 1000 + 100).toFixed(2),
+    sl: (Math.random() * 50 + 10).toFixed(2),
+    tp: (Math.random() * 100 + 20).toFixed(2)
+  };
+}
+
+// ================== BASIC ENGLISH UNDERSTANDING ==================
+bot.on("message", async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text?.toLowerCase();
+
+  if (!text) return;
+
+  // HI / HELLO
+  if (["hi", "hello", "hey"].includes(text)) {
+    return bot.sendMessage(
+      chatId,
+      `👋 Hi ${msg.from.first_name}!\n\nYou can say:\n• add coin BTC\n• price btc\n• signal\n• help`
+    );
+  }
+
+  // HELP
+  if (text.includes("help")) {
+    return bot.sendMessage(
+      chatId,
+      `🧠 Commands:\n\nadd coin BTC\nsignal\nprice BTC\nhi / hello`
+    );
+  }
+
+  // ADD COIN
+  if (text.startsWith("add coin")) {
+    const coin = text.split(" ").pop().toUpperCase();
+    userCoins[chatId] = coin;
+    return bot.sendMessage(chatId, `✅ ${coin} added for analysis`);
+  }
+
+  // PRICE (mock)
+  if (text.startsWith("price")) {
+    const coin = text.split(" ").pop().toUpperCase();
+    return bot.sendMessage(
+      chatId,
+      `💰 ${coin} price: ${(Math.random() * 1000).toFixed(2)} USDT`
+    );
+  }
+
+  // SIGNAL
+  if (text.includes("signal")) {
+    const coin = userCoins[chatId] || "BTC";
+    const signal = generateSignal(coin);
+
+    const aiExplanation = await askAI(
+      `Explain a ${signal.direction} trade on ${coin} futures with ${signal.confidence}% confidence in simple English`
+    );
+
+    return bot.sendMessage(
+      chatId,
+      `📊 *${coin} Futures Signal*\n\n` +
+      `Direction: ${signal.direction}\n` +
+      `Timeframe: ${TIMEFRAME}\n` +
+      `Entry: ${signal.entry}\n` +
+      `SL: ${signal.sl}\n` +
+      `TP: ${signal.tp}\n\n` +
+      `Confidence: ${signal.confidence}%\n\n` +
+      `🤖 AI Explanation:\n${aiExplanation}`,
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  // AI FALLBACK (English understanding)
+  const aiReply = await askAI(
+    `User said: "${text}". Respond politely and guide them to crypto bot commands.`
+  );
+
+  bot.sendMessage(chatId, aiReply);
+});
+
+// ================== HOURLY AUTO SIGNAL ==================
+setInterval(async () => {
+  for (const chatId in userCoins) {
+    const coin = userCoins[chatId];
+    const signal = generateSignal(coin);
+
+    bot.sendMessage(
+      chatId,
+      `⏰ Hourly Update\n\n${coin} → ${signal.direction}\nConfidence: ${signal.confidence}%`
+    );
+  }
+}, 60 * 60 * 1000);

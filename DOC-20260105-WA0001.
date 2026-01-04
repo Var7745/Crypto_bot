@@ -1,0 +1,23 @@
+{
+  "name": "telegram-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "@replit/vite-plugin-cartographer": "^0.4.4",
+    "@replit/vite-plugin-dev-banner": "^0.1.1",
+    "@replit/vite-plugin-runtime-error-modal": "^0.0.4",
+    "@tailwindcss/typography": "^0.5.19",
+    "@vitejs/plugin-react": "^5.1.2",
+    "body-parser": "^2.2.1",
+    "drizzle-kit": "^0.31.8",
+    "express": "^5.2.1",
+    "node-fetch": "^3.3.2",
+    "node-telegram-bot-api": "^0.67.0",
+    "tailwindcss": "^4.1.18",
+    "tailwindcss-animate": "^1.0.7",
+    "vite": "^7.3.0"
+  }
+}
