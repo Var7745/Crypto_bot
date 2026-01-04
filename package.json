@@ -1,20 +1,14 @@
 {
-  "name": "crypto-ai-bot",
+  "name": "crypto-telegram-bot",
   "version": "1.0.0",
-  "description": "Crypto AI Telegram bot with OpenAI integration",
-  "main": "bot.js",
-  "type": "module",
+  "main": "src/bot.js",
   "scripts": {
-    "start": "node bot.js",
-    "dev": "node bot.js"
+    "start": "node src/bot.js"
   },
   "dependencies": {
     "express": "^5.2.1",
-    "body-parser": "^2.2.1",
     "node-telegram-bot-api": "^0.67.0",
-    "node-fetch": "^3.3.2"
-  },
-  "engines": {
-    "node": ">=18"
+    "node-fetch": "^3.3.2",
+    "body-parser": "^2.2.1"
   }
 }
