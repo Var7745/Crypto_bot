@@ -1,18 +1,37 @@
+// bot.js
+
 import TelegramBot from "node-telegram-bot-api";
+import express from "express";
+import bodyParser from "body-parser";
 import fetch from "node-fetch";
 
 // ================== ENV ==================
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
+const PORT = process.env.PORT || 3000;
 
 if (!BOT_TOKEN || !OPENAI_KEY) {
   throw new Error("BOT_TOKEN or OPENAI_API_KEY missing");
 }
 
-// ================== TELEGRAM (POLLING) ==================
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+// ================== TELEGRAM & EXPRESS ==================
+const bot = new TelegramBot(BOT_TOKEN, { polling: false }); // no polling, we use webhook
+const app = express();
+app.use(bodyParser.json());
 
-console.log("🤖 Telegram bot started with polling");
+// ================== WEBHOOK ==================
+const WEBHOOK_URL = `https://${process.env.RENDER_SERVICE_NAME}.onrender.com`;
+
+bot.setWebHook(`${WEBHOOK_URL}/webhook`);
+
+app.post("/webhook", (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
+
+app.get("/", (req, res) => {
+  res.send("🤖 Crypto AI Bot is running");
+});
 
 // ================== USER STATE ==================
 const userCoins = {};
@@ -23,25 +42,26 @@ async function askAI(prompt) {
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${OPENAI_KEY}`,
-      "Content-Type": "application/json"
+      "Authorization": `Bearer ${OPENAI_KEY}`,
+      "Content-Type": "application/json",
     },
     body: JSON.stringify({
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: "You are a professional crypto futures trader." },
-        { role: "user", content: prompt }
-      ]
-    })
+        { role: "user", content: prompt },
+      ],
+    }),
   });
 
   const data = await response.json();
-  return data.choices?.[0]?.message?.content || "AI response unavailable.";
+  return data.choices[0].message.content;
 }
 
 // ================== STRATEGY ==================
 function generateSignal(coin) {
-  const direction = Math.random() > 0.5 ? "LONG" : "SHORT";
+  const directions = ["LONG", "SHORT"];
+  const direction = directions[Math.floor(Math.random() * directions.length)];
   const confidence = Math.floor(65 + Math.random() * 30);
 
   return {
@@ -50,40 +70,40 @@ function generateSignal(coin) {
     confidence,
     entry: (Math.random() * 1000 + 100).toFixed(2),
     sl: (Math.random() * 50 + 10).toFixed(2),
-    tp: (Math.random() * 100 + 20).toFixed(2)
+    tp: (Math.random() * 100 + 20).toFixed(2),
   };
 }
 
-// ================== MESSAGE HANDLER ==================
+// ================== BOT COMMANDS ==================
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text?.toLowerCase();
   if (!text) return;
 
-  // Greetings
+  // HI / HELLO
   if (["hi", "hello", "hey"].includes(text)) {
     return bot.sendMessage(
       chatId,
-      `👋 Hi ${msg.from.first_name}!\n\nTry:\n• add coin BTC\n• signal\n• price BTC\n• help`
+      `👋 Hi ${msg.from.first_name}!\n\nCommands:\n• add coin BTC\n• price btc\n• signal\n• help`
     );
   }
 
-  // Help
+  // HELP
   if (text.includes("help")) {
     return bot.sendMessage(
       chatId,
-      `📘 Commands:\n\nadd coin BTC\nsignal\nprice BTC\nhi / hello`
+      `🧠 Commands:\n\nadd coin BTC\nsignal\nprice BTC\nhi / hello`
     );
   }
 
-  // Add coin
+  // ADD COIN
   if (text.startsWith("add coin")) {
     const coin = text.split(" ").pop().toUpperCase();
     userCoins[chatId] = coin;
     return bot.sendMessage(chatId, `✅ ${coin} added for analysis`);
   }
 
-  // Price (mock)
+  // PRICE (mock)
   if (text.startsWith("price")) {
     const coin = text.split(" ").pop().toUpperCase();
     return bot.sendMessage(
@@ -92,13 +112,13 @@ bot.on("message", async (msg) => {
     );
   }
 
-  // Signal
+  // SIGNAL
   if (text.includes("signal")) {
     const coin = userCoins[chatId] || "BTC";
     const signal = generateSignal(coin);
 
-    const explanation = await askAI(
-      `Explain a ${signal.direction} ${coin} futures trade with ${signal.confidence}% confidence in simple English`
+    const aiExplanation = await askAI(
+      `Explain a ${signal.direction} trade on ${coin} futures with ${signal.confidence}% confidence in simple English`
     );
 
     return bot.sendMessage(
@@ -110,26 +130,32 @@ bot.on("message", async (msg) => {
       `SL: ${signal.sl}\n` +
       `TP: ${signal.tp}\n\n` +
       `Confidence: ${signal.confidence}%\n\n` +
-      `🤖 AI:\n${explanation}`,
+      `🤖 AI Explanation:\n${aiExplanation}`,
       { parse_mode: "Markdown" }
     );
   }
 
   // AI fallback
-  const reply = await askAI(
-    `User said: "${text}". Reply politely and guide them to crypto bot commands.`
+  const aiReply = await askAI(
+    `User said: "${text}". Respond politely and guide them to crypto bot commands.`
   );
-
-  bot.sendMessage(chatId, reply);
+  bot.sendMessage(chatId, aiReply);
 });
 
 // ================== HOURLY AUTO SIGNAL ==================
-setInterval(() => {
+setInterval(async () => {
   for (const chatId in userCoins) {
-    const signal = generateSignal(userCoins[chatId]);
+    const coin = userCoins[chatId];
+    const signal = generateSignal(coin);
+
     bot.sendMessage(
       chatId,
-      `⏰ Hourly Update\n${signal.coin}: ${signal.direction}\nConfidence: ${signal.confidence}%`
+      `⏰ Hourly Update\n\n${coin} → ${signal.direction}\nConfidence: ${signal.confidence}%`
     );
   }
 }, 60 * 60 * 1000);
+
+// ================== START SERVER ==================
+app.listen(PORT, () => {
+  console.log(`🚀 Bot running on port ${PORT}`);
+});
