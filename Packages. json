@@ -1,0 +1,13 @@
+{
+  "name": "telegram-crypto-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.67.0",
+    "openai": "^6.15.0",
+    "axios": "^1.13.2"
+  }
+}
