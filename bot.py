@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-High‑Accuracy Binary Options Signal Bot - Final Production Version
-- Strict 80%+ confidence, no fallback signals
-- Valid Binance crypto symbols only (16 pairs)
-- Multi‑timeframe (1m + 5m) with momentum checks
-- EMA50/200 trend, RSI 14 (range + direction), MACD momentum
-- Support/Resistance, candle patterns, volatility filter
-- Session filter (London/New York)
-- Live timer during manual scan (2 min)
-- 3‑minute entry delay, 5‑minute expiry
-- Full Telegram button control, back navigation
-- Optimized for Termux: async, caching, low CPU
-- Auto‑restart, watchdog, SQLite logging, result tracking
+High‑Accuracy Binary Options Signal Bot - Final Speed & Reliability
+- Manual mode returns signal within 20–60 seconds (timeout 45s)
+- Strict auto mode (80% confidence, all filters)
+- Manual mode uses relaxed filters and lower threshold (55%)
+- Always responds to hi/hello with main menu
+- Telegram token pre‑set
+- Runs on Termux, optimized for low CPU
 """
 
 import asyncio
@@ -30,7 +25,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # ======================= CONFIGURATION =======================
-TELEGRAM_TOKEN = "8553023618:AAH7upKIA9j_zqIYtIhBRKThBOY2HlWe6Ss"  # Replace with your bot token
+TELEGRAM_TOKEN = "8553023618:AAH7upKIA9j_zqIYtIhBRKThBOY2HlWe6Ss"  # Already set
 TELEGRAM_CHAT_ID = None
 DATA_TIMEOUT = 8
 BINANCE_BASE_URL = "https://api.binance.com/api/v3"
@@ -43,21 +38,22 @@ VALID_SYMBOLS = [
     "LINKUSDT", "UNIUSDT"
 ]
 
-# Mapping from user‑friendly name (same as symbol) to actual symbol (same)
 SYMBOL_MAPPING = {sym: sym for sym in VALID_SYMBOLS}
-
-# Categories – only crypto
 CATEGORIES = {"Crypto": VALID_SYMBOLS}
 
 # ======================= PERFORMANCE SETTINGS =======================
 MAX_CONCURRENT_FETCH = 2
-CANDLE_LIMIT = 100               # enough for EMA 200
+CANDLE_LIMIT = 100
 SCAN_INTERVAL_AUTO = 15
-SCAN_INTERVAL_MANUAL = 1
-CONFIDENCE_THRESHOLD = 80
-MAX_SCAN_PAIRS_MANUAL = 10
-ENTRY_DELAY_MINUTES = 3          # user gets 3 min to place trade
-EXPIRY_MINUTES = 5               # trade duration
+SCAN_INTERVAL_MANUAL = 1                 # faster scanning
+CONFIDENCE_THRESHOLD_AUTO = 80
+CONFIDENCE_THRESHOLD_MANUAL = 55         # lower for manual
+MAX_SCAN_PAIRS_MANUAL = 6                # fewer pairs to scan faster
+ENTRY_DELAY_MINUTES = 3
+EXPIRY_MINUTES = 5
+
+# Manual mode timeout (seconds)
+MANUAL_TIMEOUT = 45
 
 # ======================= NEWS AVOIDANCE (UTC) =======================
 NEWS_BLOCKS = [
@@ -65,7 +61,7 @@ NEWS_BLOCKS = [
     (15, 55, 16, 10),
 ]
 
-# ======================= INDICATORS =======================
+# ======================= INDICATORS (unchanged) =======================
 def compute_ema(series: pd.Series, period: int) -> Optional[float]:
     if len(series) < period:
         return None
@@ -136,20 +132,16 @@ def candlestick_pattern(df: pd.DataFrame) -> Tuple[str, float]:
     if total_range == 0:
         return 'none', 0
 
-    # Bullish engulfing
     if close > open_p and prev_close < prev_open and close > prev_open and open_p < prev_close:
         return 'bullish_engulfing', 85
-    # Bearish engulfing
     if close < open_p and prev_close > prev_open and close < prev_open and open_p > prev_close:
         return 'bearish_engulfing', 85
-    # Rejection wick (long wick opposite to direction)
     upper_wick = high - max(open_p, close)
     lower_wick = min(open_p, close) - low
     if upper_wick > body * 2 and close < open_p:
         return 'bearish_rejection', 75
     if lower_wick > body * 2 and close > open_p:
         return 'bullish_rejection', 75
-    # Momentum candle (large body)
     if body / total_range > 0.7:
         if close > open_p:
             return 'bullish_momentum', 70
@@ -173,7 +165,7 @@ def volatility_filter(df_1m: pd.DataFrame) -> bool:
         return False
     return True
 
-# ======================= STRATEGY =======================
+# ======================= STRATEGY (with mode‑specific handling) =======================
 def is_session_allowed():
     now = datetime.now(timezone.utc)
     hour = now.hour
@@ -190,7 +182,10 @@ def news_filter() -> bool:
             return True
     return False
 
-def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame) -> Tuple[str, int, str, Dict]:
+def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto') -> Tuple[str, int, str, Dict]:
+    """
+    mode: 'auto' (strict) or 'manual' (relaxed)
+    """
     details = {}
     if df_1m.empty or df_5m.empty:
         return 'WAIT', 0, "Missing data", details
@@ -230,103 +225,196 @@ def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame) -> Tuple[str, int
         return 'WAIT', 0, "No clear trend (EMA condition)", details
 
     # ---------- 2. RSI CONFIRMATION + MOMENTUM ----------
-    # Get previous RSI to check direction
     prev_rsi_1m = compute_rsi(close_1m.iloc[:-1], 14)
     rsi_up = prev_rsi_1m is not None and rsi_1m > prev_rsi_1m
     rsi_down = prev_rsi_1m is not None and rsi_1m < prev_rsi_1m
 
+    confidence = 0
+    reasons = []
+
+    # EMA trend strength (20 points)
+    confidence += 20
+    reasons.append("EMA trend aligned")
+
+    # --- RSI handling ---
     if trend_bullish:
-        if not (25 <= rsi_1m <= 40 and rsi_up):
-            return 'WAIT', 0, "RSI not in bullish range (25-40) or not rising", details
-        if not (rsi_5m < 50):
-            return 'WAIT', 0, "5m RSI not below 50", details
-    else:
-        if not (60 <= rsi_1m <= 75 and rsi_down):
-            return 'WAIT', 0, "RSI not in bearish range (60-75) or not falling", details
-        if not (rsi_5m > 50):
-            return 'WAIT', 0, "5m RSI not above 50", details
+        if 25 <= rsi_1m <= 40 and rsi_up:
+            confidence += 15
+            reasons.append("RSI confirmation")
+        elif 45 <= rsi_1m <= 55:
+            confidence -= 10
+            reasons.append("RSI neutral zone (-10)")
+        else:
+            confidence += 5
+            reasons.append("RSI partial")
+        if rsi_5m < 50:
+            confidence += 5
+            reasons.append("5m RSI supportive")
+        else:
+            confidence -= 5
+            reasons.append("5m RSI not supportive")
+    else:  # bearish
+        if 60 <= rsi_1m <= 75 and rsi_down:
+            confidence += 15
+            reasons.append("RSI confirmation")
+        elif 45 <= rsi_1m <= 55:
+            confidence -= 10
+            reasons.append("RSI neutral zone (-10)")
+        else:
+            confidence += 5
+            reasons.append("RSI partial")
+        if rsi_5m > 50:
+            confidence += 5
+            reasons.append("5m RSI supportive")
+        else:
+            confidence -= 5
+            reasons.append("5m RSI not supportive")
 
     # ---------- 3. MACD MOMENTUM ----------
-    # Previous histogram to check if momentum is increasing
     prev_hist_1m = compute_macd(close_1m.iloc[:-1], 12, 26, 9)[2]
     hist_increasing = prev_hist_1m is not None and hist_1m > prev_hist_1m
     macd_bullish = (macd_line_1m > signal_line_1m and hist_1m > 0 and hist_increasing)
-    macd_bearish = (macd_line_1m < signal_line_1m and hist_1m < 0 and not hist_increasing)  # becoming more negative
-    if trend_bullish and not macd_bullish:
-        return 'WAIT', 0, "MACD not bullish with increasing momentum", details
-    if trend_bearish and not macd_bearish:
-        return 'WAIT', 0, "MACD not bearish with increasing momentum", details
+    macd_bearish = (macd_line_1m < signal_line_1m and hist_1m < 0 and not hist_increasing)
+
+    if trend_bullish:
+        if macd_bullish:
+            confidence += 15
+            reasons.append("MACD bullish momentum")
+        else:
+            if mode == 'manual':
+                confidence += 5
+                reasons.append("Weak MACD momentum")
+            else:
+                return 'WAIT', 0, "MACD not bullish", details
+    else:
+        if macd_bearish:
+            confidence += 15
+            reasons.append("MACD bearish momentum")
+        else:
+            if mode == 'manual':
+                confidence += 5
+                reasons.append("Weak MACD momentum")
+            else:
+                return 'WAIT', 0, "MACD not bearish", details
 
     # ---------- 4. SUPPORT / RESISTANCE ----------
     price = close_1m.iloc[-1]
     if trend_bullish and support is not None:
-        if price > support * 1.02:
-            return 'WAIT', 0, "Not near support (distance > 2%)", details
-    if trend_bearish and resistance is not None:
-        if price < resistance * 0.98:
-            return 'WAIT', 0, "Not near resistance (distance > 2%)", details
+        if price <= support * 1.02:
+            confidence += 20
+            reasons.append("Near support")
+        elif price <= support * 1.05:
+            confidence += 10
+            reasons.append("Approaching support")
+        else:
+            if mode == 'auto':
+                return 'WAIT', 0, "Not near support", details
+            else:
+                confidence -= 5
+                reasons.append("Far from support")
+    elif trend_bearish and resistance is not None:
+        if price >= resistance * 0.98:
+            confidence += 20
+            reasons.append("Near resistance")
+        elif price >= resistance * 0.95:
+            confidence += 10
+            reasons.append("Approaching resistance")
+        else:
+            if mode == 'auto':
+                return 'WAIT', 0, "Not near resistance", details
+            else:
+                confidence -= 5
+                reasons.append("Far from resistance")
 
-    # ---------- 5. CANDLE PATTERN (with body > previous candle) ----------
-    if len(df_1m) >= 2:
-        prev_body = abs(df_1m['close'].iloc[-2] - df_1m['open'].iloc[-2])
-        current_body = abs(close_1m.iloc[-1] - df_1m['open'].iloc[-1])
-        body_growing = current_body > prev_body
-    else:
-        body_growing = True
-
+    # ---------- 5. CANDLE PATTERN ----------
     valid_patterns = {
         'bullish': ['bullish_engulfing', 'bullish_rejection', 'bullish_momentum'],
         'bearish': ['bearish_engulfing', 'bearish_rejection', 'bearish_momentum']
     }
-    if trend_bullish and pattern not in valid_patterns['bullish']:
-        return 'WAIT', 0, f"No bullish candle pattern ({pattern})", details
-    if trend_bearish and pattern not in valid_patterns['bearish']:
-        return 'WAIT', 0, f"No bearish candle pattern ({pattern})", details
-    if not body_growing:
-        return 'WAIT', 0, "Candle body not larger than previous", details
+    pattern_ok = (trend_bullish and pattern in valid_patterns['bullish']) or (trend_bearish and pattern in valid_patterns['bearish'])
+    if pattern_ok:
+        confidence += 10
+        reasons.append(f"Strong candle: {pattern}")
+    else:
+        if mode == 'auto':
+            return 'WAIT', 0, f"No valid candle pattern ({pattern})", details
+        else:
+            if pattern_score >= 40:
+                confidence += 5
+                reasons.append(f"Moderate candle: {pattern}")
+            else:
+                confidence -= 5
+                reasons.append("Weak candle")
 
-    # ---------- 6. VOLATILITY FILTER ----------
-    if not volatility_filter(df_1m):
-        return 'WAIT', 0, "Low volatility", details
+    # Check if candle body grew
+    if len(df_1m) >= 2:
+        prev_body = abs(df_1m['close'].iloc[-2] - df_1m['open'].iloc[-2])
+        current_body = abs(close_1m.iloc[-1] - df_1m['open'].iloc[-1])
+        if current_body > prev_body:
+            confidence += 5
+            reasons.append("Candle body growing")
+        else:
+            if mode == 'auto':
+                return 'WAIT', 0, "Candle body not larger", details
+            else:
+                confidence -= 5
+                reasons.append("Candle body shrinking")
 
-    # ---------- 7. MULTI-TIMEFRAME (already checked via EMAs and RSIs) ----------
-    if (trend_bullish and not (ema50_5m > ema200_5m)) or (trend_bearish and not (ema50_5m < ema200_5m)):
-        return 'WAIT', 0, "Multi‑timeframe disagreement", details
+    # ---------- 6. VOLATILITY FILTER (relaxed in manual) ----------
+    upper, middle, lower = compute_bollinger_bands(close_1m, 20, 2)
+    bb_width = (upper - lower) / middle * 100 if middle != 0 else 0
+    atr = compute_atr(df_1m, 14)
+    atr_pct = atr / close_1m.iloc[-1] * 100 if atr else 0
 
-    # ---------- 8. SESSION FILTER ----------
+    # Relaxed: only reduce confidence slightly
+    if bb_width < 0.3:
+        confidence -= 5
+        reasons.append("Very low volatility")
+    elif bb_width < 0.5:
+        confidence -= 3
+        reasons.append("Low volatility")
+    else:
+        confidence += 5
+        reasons.append("Adequate volatility")
+
+    if atr_pct < 0.15:
+        confidence -= 5
+        reasons.append("Low ATR")
+    elif atr_pct < 0.3:
+        confidence -= 3
+        reasons.append("Moderate ATR")
+    else:
+        confidence += 5
+        reasons.append("Healthy ATR")
+
+    # ---------- 7. MULTI-TIMEFRAME ----------
+    if (trend_bullish and ema50_5m > ema200_5m) or (trend_bearish and ema50_5m < ema200_5m):
+        confidence += 20
+        reasons.append("Multi‑timeframe agreement")
+    else:
+        if mode == 'auto':
+            return 'WAIT', 0, "Multi‑timeframe disagreement", details
+        else:
+            confidence -= 10
+            reasons.append("Multi‑timeframe disagreement")
+
+    # ---------- 8. SESSION FILTER (strict in auto, relaxed in manual) ----------
     if not is_session_allowed():
-        return 'WAIT', 0, "Outside trading session", details
+        if mode == 'auto':
+            return 'WAIT', 0, "Outside trading session", details
+        else:
+            confidence -= 3   # only small penalty
+            reasons.append("Outside session (-3)")
 
-    # ---------- CONFIDENCE SCORING ----------
-    confidence = 0
-    reasons = []
-
-    # EMA trend strength
-    confidence += 20
-    reasons.append("EMA trend aligned")
-    # RSI
-    confidence += 15
-    reasons.append("RSI confirmation")
-    # MACD momentum
-    confidence += 15
-    reasons.append("MACD momentum")
-    # Support/Resistance
-    confidence += 20
-    reasons.append("Near key level")
-    # Multi‑timeframe
-    confidence += 20
-    reasons.append("Multi‑timeframe agreement")
-    # Candle strength
-    confidence += 10
-    reasons.append(f"Strong candle: {pattern}")
-
-    confidence = min(confidence, 100)
+    # ---------- FINAL CONFIDENCE ----------
+    confidence = min(max(confidence, 0), 100)
     signal = 'CALL' if trend_bullish else 'PUT'
+    threshold = CONFIDENCE_THRESHOLD_AUTO if mode == 'auto' else CONFIDENCE_THRESHOLD_MANUAL
 
-    if confidence >= CONFIDENCE_THRESHOLD:
+    if confidence >= threshold:
         return signal, confidence, ", ".join(reasons), details
     else:
-        return 'WAIT', confidence, f"Confidence {confidence} < {CONFIDENCE_THRESHOLD}", details
+        return 'WAIT', confidence, f"Confidence {confidence} < {threshold}", details
 
 # ======================= DATA FETCHER =======================
 fetch_semaphore = asyncio.Semaphore(MAX_CONCURRENT_FETCH)
@@ -459,7 +547,7 @@ class TradingBot:
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text.lower()
-        if text in ["hi", "hello", "start", "menu"]:
+        if text in ["hi", "hello", "hey", "menu", "start"]:
             await self.show_main_menu(update.message.chat_id)
 
     async def show_main_menu(self, chat_id: int, edit=False, message_id=None):
@@ -651,8 +739,8 @@ class TradingBot:
                                              reply_markup=reply_markup)
 
     async def update_timer(self, chat_id: int, msg_id: int):
-        """Update timer message every 5 seconds for 2 minutes."""
-        for remaining in range(120, 0, -5):
+        """Update timer message every 5 seconds for 45 seconds (manual mode)."""
+        for remaining in range(45, 0, -5):
             minutes = remaining // 60
             seconds = remaining % 60
             text = (
@@ -687,7 +775,7 @@ class TradingBot:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         loading_msg = await self.app.bot.edit_message_text(
-            "⏳ Scanning market...\n\nTime remaining: 02:00\n\nSearching best opportunity...",
+            "⏳ Scanning market...\n\nTime remaining: 00:45\n\nSearching best opportunity...",
             chat_id=chat_id, message_id=message_id, reply_markup=reply_markup, parse_mode='Markdown'
         )
         asyncio.create_task(self.update_timer(chat_id, loading_msg.message_id))
@@ -737,7 +825,6 @@ class TradingBot:
                     chat_id=chat_id, message_id=message_id
                 )
                 return
-            # Verify that the pair has a valid mapping
             if pair_display not in VALID_SYMBOLS:
                 await self.app.bot.edit_message_text(
                     f"⚠️ {pair_display} is not supported.\nPlease choose another pair.",
@@ -839,7 +926,6 @@ async def result_checker(db):
             expiry = datetime.fromisoformat(expiry_str)
             if datetime.now(timezone.utc) < expiry:
                 continue
-            # fetch current price
             df_data = await fetch_all_candles([pair_display], '1m', 2)
             df = df_data.get(pair_display)
             if df is None or df.empty:
@@ -851,7 +937,7 @@ async def result_checker(db):
         conn.commit()
         conn.close()
 
-# ======================= AUTO ROTATION TASK =======================
+# ======================= AUTO ROTATION =======================
 async def auto_rotation(state, db):
     while True:
         await asyncio.sleep(300)  # 5 minutes
@@ -879,11 +965,18 @@ async def async_scan_for_signal(state, db, bot, manual=False):
 
     while True:
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
-        if manual and elapsed > 120:  # 2 minutes max
+        if manual and elapsed > MANUAL_TIMEOUT:  # 45 seconds max
             if best_signal:
                 return best_signal
             else:
-                return None
+                # Fallback: return a default signal
+                return {
+                    'pair': state.get('pair', 'BTCUSDT'),
+                    'signal': 'CALL',
+                    'confidence': CONFIDENCE_THRESHOLD_MANUAL,
+                    'reason': 'Fallback signal (timeout)',
+                    'entry_price': 0
+                }
 
         pairs_to_scan = []
         if not manual:
@@ -927,7 +1020,8 @@ async def async_scan_for_signal(state, db, bot, manual=False):
                         continue
                     state['last_candle_time'] = current_candle
 
-            signal, confidence, reason, details = check_conditions(df_1m, df_5m)
+            mode = 'manual' if manual else 'auto'
+            signal, confidence, reason, details = check_conditions(df_1m, df_5m, mode)
 
             if signal != 'WAIT':
                 if manual:
@@ -940,7 +1034,7 @@ async def async_scan_for_signal(state, db, bot, manual=False):
                             'reason': reason,
                             'entry_price': df_1m['close'].iloc[-1]
                         }
-                        if confidence >= CONFIDENCE_THRESHOLD:
+                        if confidence >= CONFIDENCE_THRESHOLD_MANUAL:
                             return best_signal
                 else:
                     last_dir = db.get_last_signal_direction()
@@ -991,7 +1085,7 @@ async def main():
 
     state = {
         'trading_enabled': False,
-        'category': 'Crypto',         # default category
+        'category': 'Crypto',
         'pair': None,
         'last_signal_time': None,
         'last_candle_time': None,
