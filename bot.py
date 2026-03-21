@@ -26,7 +26,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # ======================= CONFIGURATION =======================
-TELEGRAM_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your bot token
+TELEGRAM_TOKEN = "8553023618:AAH7upKIA9j_zqIYtIhBRKThBOY2HlWe6Ss"  # Replace with your bot token
 TELEGRAM_CHAT_ID = None
 DATA_TIMEOUT = 6
 BINANCE_BASE_URL = "https://api.binance.com/api/v3"
