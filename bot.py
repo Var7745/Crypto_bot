@@ -2,31 +2,28 @@
 # -*- coding: utf-8 -*-
 """
 Ultimate Binary Options Trading Signal Bot - Production Ready
-- Async, lightweight, runs 24/7 in Termux
-- Full Telegram button control (no typing)
+- Fixed async/event loop issues for Termux
+- Correct asyncio lock usage
+- Runs 24/7 without threading conflicts
+- Full Telegram button control
 - Guaranteed manual signal (never fails)
-- Auto mode: strict filters, high accuracy
-- Manual mode: fast, relaxed, always returns a signal
-- Clean UI with back navigation and cancel option
 """
 
 import asyncio
 import aiohttp
 import logging
 import sqlite3
-import threading
-import time
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Tuple, Optional, List, Any
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ======================= CONFIGURATION =======================
-TELEGRAM_TOKEN = "8553023618:AAH7upKIA9j_zqIYtIhBRKThBOY2HlWe6Ss"          # Replace with your bot token
-TELEGRAM_CHAT_ID = None                    # Optional: send auto signals to a specific chat
+TELEGRAM_TOKEN = "8553023618:AAH7upKIA9j_zqIYtIhBRKThBOY2HlWe6Ss"  # Replace with your token
+TELEGRAM_CHAT_ID = None
 DATA_TIMEOUT = 8
 BINANCE_BASE_URL = "https://api.binance.com/api/v3"
 
@@ -39,8 +36,8 @@ AVAILABLE_PAIRS = {
 # Performance settings
 MAX_CONCURRENT_FETCH = 2
 CANDLE_LIMIT = 45
-SCAN_INTERVAL_AUTO = 15          # seconds
-SCAN_INTERVAL_MANUAL = 3.5       # seconds
+SCAN_INTERVAL_AUTO = 15
+SCAN_INTERVAL_MANUAL = 3.5
 CONFIDENCE_THRESHOLD_AUTO = 75
 CONFIDENCE_THRESHOLD_MANUAL = 70
 FALLBACK_CONFIDENCE = 50
@@ -151,7 +148,7 @@ async def fetch_all_candles(pairs: List[str], interval='1m', limit=CANDLE_LIMIT)
 
 # ======================= STRATEGY =======================
 def is_session_allowed():
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     hour = now.hour
     london = 8 <= hour < 16
     newyork = 13 <= hour < 21
@@ -215,22 +212,18 @@ def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto
         return 'WAIT', 0, "Timeframe mismatch", details
 
     # ====== Filters ======
-    # RSI neutral zone (always reject)
     if 45 <= rsi_1m <= 55:
         return 'WAIT', 0, "RSI neutral (45-55)", details
 
-    # Quick exit: Bollinger width too small (dead market)
     if details['bb_width'] < 0.004:
         return 'WAIT', 0, "Dead market (tight BB)", details
 
-    # Volume filter (only auto)
     if mode == 'auto':
         if len(df_1m) >= 20:
             avg_vol = df_1m['volume'].tail(20).mean()
             if df_1m['volume'].iloc[-1] < avg_vol * 0.7:
                 return 'WAIT', 0, "Low volume", details
 
-    # Movement filter: ONLY applied in AUTO mode
     if mode == 'auto' and atr_1m is not None:
         price_change = abs(close_1m.iloc[-1] - close_1m.iloc[-2]) / close_1m.iloc[-2] * 100
         required_move = details['bb_width'] * 0.1 if details['bb_width'] else 0.05
@@ -241,14 +234,12 @@ def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto
     confidence = 0
     reasons = []
 
-    # EMA alignment
     if (trend == 'bullish' and ema9_1m > ema21_1m) or (trend == 'bearish' and ema9_1m < ema21_1m):
         confidence += 25
         reasons.append("EMA aligned")
     else:
         return 'WAIT', 0, "EMA condition failed", details
 
-    # RSI
     if trend == 'bullish' and 40 <= rsi_1m <= 65:
         confidence += 20
         reasons.append("RSI bullish range")
@@ -258,7 +249,6 @@ def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto
     else:
         return 'WAIT', 0, f"RSI out of range: {rsi_1m:.2f}", details
 
-    # Bollinger Bands
     price = close_1m.iloc[-1]
     if mode == 'auto':
         if trend == 'bullish' and price <= lower_1m * 1.02:
@@ -269,7 +259,7 @@ def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto
             reasons.append("Price near upper BB")
         else:
             return 'WAIT', 0, "BB position mismatch", details
-    else:  # manual: allow middle
+    else:
         if trend == 'bullish' and price <= middle_1m * 1.02:
             confidence += 15
             reasons.append("Price near lower/mid BB")
@@ -279,7 +269,6 @@ def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto
         else:
             return 'WAIT', 0, "BB position mismatch (manual)", details
 
-    # MACD crossover
     if trend == 'bullish' and bullish_cross:
         confidence += 25
         reasons.append("MACD bullish crossover")
@@ -291,7 +280,6 @@ def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto
         if hist_1m < 0:
             confidence += 5
     else:
-        # If no crossover, but already in momentum (relaxed for manual)
         if mode == 'manual' and ((trend == 'bullish' and hist_1m > 0 and macd_line_1m > signal_line_1m) or
                                  (trend == 'bearish' and hist_1m < 0 and macd_line_1m < signal_line_1m)):
             confidence += 10
@@ -299,7 +287,6 @@ def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto
         else:
             return 'WAIT', 0, "MACD condition missing", details
 
-    # Candlestick strength
     if mode == 'auto':
         if (trend == 'bullish' and candle_type == 'bullish' and candle_score >= 70) or \
            (trend == 'bearish' and candle_type == 'bearish' and candle_score >= 70):
@@ -307,7 +294,7 @@ def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto
             reasons.append(f"Strong {candle_type} candle")
         else:
             return 'WAIT', 0, f"Candle weak: {candle_type} ({candle_score})", details
-    else:  # manual: allow moderate candles
+    else:
         if (trend == 'bullish' and candle_type == 'bullish' and candle_score >= 60) or \
            (trend == 'bearish' and candle_type == 'bearish' and candle_score >= 60):
             confidence += 10
@@ -315,7 +302,6 @@ def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto
         else:
             return 'WAIT', 0, f"Candle weak: {candle_type} ({candle_score})", details
 
-    # ATR bonus if strong movement
     if atr_1m is not None and (atr_1m / price) > 0.008:
         confidence += 5
         reasons.append("Strong volatility")
@@ -331,88 +317,78 @@ def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto
 class Database:
     def __init__(self, db_path='signals.db'):
         self.db_path = db_path
-        self.lock = threading.Lock()
         self.init_db()
 
     def init_db(self):
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            c.execute('''CREATE TABLE IF NOT EXISTS signals
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                          timestamp TEXT,
-                          category TEXT,
-                          pair TEXT,
-                          signal TEXT,
-                          confidence INTEGER,
-                          reason TEXT,
-                          entry_price REAL,
-                          expiry_time TEXT,
-                          result TEXT)''')
-            conn.commit()
-            conn.close()
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS signals
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      timestamp TEXT,
+                      category TEXT,
+                      pair TEXT,
+                      signal TEXT,
+                      confidence INTEGER,
+                      reason TEXT,
+                      entry_price REAL,
+                      expiry_time TEXT,
+                      result TEXT)''')
+        conn.commit()
+        conn.close()
 
     def log_signal(self, category, pair, signal, confidence, reason, entry_price, expiry_time):
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            now = datetime.utcnow().isoformat()
-            c.execute('''INSERT INTO signals
-                         (timestamp, category, pair, signal, confidence, reason, entry_price, expiry_time)
-                         VALUES (?,?,?,?,?,?,?,?)''',
-                      (now, category, pair, signal, confidence, reason, entry_price, expiry_time))
-            conn.commit()
-            signal_id = c.lastrowid
-            conn.close()
-            return signal_id
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        now = datetime.now(timezone.utc).isoformat()
+        c.execute('''INSERT INTO signals
+                     (timestamp, category, pair, signal, confidence, reason, entry_price, expiry_time)
+                     VALUES (?,?,?,?,?,?,?,?)''',
+                  (now, category, pair, signal, confidence, reason, entry_price, expiry_time))
+        conn.commit()
+        signal_id = c.lastrowid
+        conn.close()
+        return signal_id
 
     def get_last_signal_direction(self):
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            c.execute('SELECT signal FROM signals ORDER BY timestamp DESC LIMIT 1')
-            row = c.fetchone()
-            conn.close()
-            return row[0] if row else None
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('SELECT signal FROM signals ORDER BY timestamp DESC LIMIT 1')
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else None
 
     def get_performance_stats(self):
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM signals WHERE result='win'")
-            wins = c.fetchone()[0]
-            c.execute("SELECT COUNT(*) FROM signals WHERE result='loss'")
-            losses = c.fetchone()[0]
-            conn.close()
-            return wins, losses
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM signals WHERE result='win'")
+        wins = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM signals WHERE result='loss'")
+        losses = c.fetchone()[0]
+        conn.close()
+        return wins, losses
 
-# ======================= TELEGRAM BOT (Full UI) =======================
+# ======================= TELEGRAM BOT =======================
 class TradingBot:
     def __init__(self, token: str, state: dict, db: Database):
         self.token = token
         self.state = state
         self.db = db
         self.app = None
-        self.loop = None
-        self.thread = None
 
-    def start(self):
-        self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-
-    def _run(self):
-        asyncio.set_event_loop(self.loop)
+    async def start(self):
+        """Run the bot in the main async loop"""
         self.app = Application.builder().token(self.token).build()
         self.app.add_handler(CommandHandler("start", self.start_command))
         self.app.add_handler(CallbackQueryHandler(self.button_callback))
-        self.app.run_polling()
+        
+        # This will run the bot and block until stopped
+        await self.app.run_polling()
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await self.show_main_menu(update.message.chat_id, edit=False)
 
     async def show_main_menu(self, chat_id: int, edit=False, message_id=None):
-        with self.state['lock']:
+        async with self.state['lock']:
             trading = self.state['trading_enabled']
             pair = self.state.get('pair', 'None')
         mode_text = "🟢 Auto" if trading else "🔴 Manual"
@@ -437,7 +413,7 @@ class TradingBot:
         else:
             await self.app.bot.send_message(chat_id=chat_id, text=text,
                                             reply_markup=reply_markup, parse_mode='Markdown')
-        with self.state['lock']:
+        async with self.state['lock']:
             self.state['current_menu'][chat_id] = 'main'
 
     async def show_settings_menu(self, chat_id: int, edit=False, message_id=None):
@@ -454,7 +430,7 @@ class TradingBot:
         else:
             await self.app.bot.send_message(chat_id=chat_id, text=text,
                                             reply_markup=reply_markup, parse_mode='Markdown')
-        with self.state['lock']:
+        async with self.state['lock']:
             self.state['current_menu'][chat_id] = 'settings'
 
     async def show_pair_selection(self, chat_id: int, edit=False, message_id=None):
@@ -471,11 +447,11 @@ class TradingBot:
         else:
             await self.app.bot.send_message(chat_id=chat_id, text=text,
                                             reply_markup=reply_markup, parse_mode='Markdown')
-        with self.state['lock']:
+        async with self.state['lock']:
             self.state['current_menu'][chat_id] = 'pair_selection'
 
     async def show_status(self, chat_id: int, edit=False, message_id=None):
-        with self.state['lock']:
+        async with self.state['lock']:
             trading = self.state['trading_enabled']
             pair = self.state.get('pair', 'None')
             trades_today = self.state.get('trades_today', 0)
@@ -500,7 +476,7 @@ class TradingBot:
         else:
             await self.app.bot.send_message(chat_id=chat_id, text=text,
                                             reply_markup=reply_markup, parse_mode='Markdown')
-        with self.state['lock']:
+        async with self.state['lock']:
             self.state['current_menu'][chat_id] = 'status'
 
     async def show_performance(self, chat_id: int, edit=False, message_id=None):
@@ -527,11 +503,11 @@ class TradingBot:
         else:
             await self.app.bot.send_message(chat_id=chat_id, text=text,
                                             reply_markup=reply_markup, parse_mode='Markdown')
-        with self.state['lock']:
+        async with self.state['lock']:
             self.state['current_menu'][chat_id] = 'performance'
 
     async def handle_start_auto(self, chat_id: int, message_id: int):
-        with self.state['lock']:
+        async with self.state['lock']:
             if self.state.get('pair') is None:
                 await self.app.bot.edit_message_text(
                     "⚠️ Please select a pair first using Settings → Select Pair.",
@@ -550,7 +526,7 @@ class TradingBot:
                                              reply_markup=reply_markup)
 
     async def handle_stop_auto(self, chat_id: int, message_id: int):
-        with self.state['lock']:
+        async with self.state['lock']:
             self.state['trading_enabled'] = False
         text = "⏸ Auto trading stopped."
         keyboard = [
@@ -562,7 +538,6 @@ class TradingBot:
                                              reply_markup=reply_markup)
 
     async def handle_generate_signal(self, chat_id: int, message_id: int):
-        # Send loading message with Cancel and Back buttons
         keyboard = [
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel_generate")],
             [InlineKeyboardButton("⬅️ Back", callback_data="back_main")],
@@ -572,17 +547,15 @@ class TradingBot:
             "⏳ Scanning market... finding best setup (within 5 min)",
             chat_id=chat_id, message_id=message_id, reply_markup=reply_markup
         )
-        # Set manual request in state
-        with self.state['lock']:
+        async with self.state['lock']:
             self.state['manual_request'] = True
             self.state['manual_chat_id'] = chat_id
-            self.state['manual_start_time'] = datetime.utcnow()
+            self.state['manual_start_time'] = datetime.now(timezone.utc)
             self.state['manual_best_signal'] = None
             self.state['manual_loading_msg_id'] = loading_msg.message_id
-            self.state['manual_loading_msg_chat'] = chat_id
 
     async def handle_cancel_generate(self, chat_id: int, message_id: int):
-        with self.state['lock']:
+        async with self.state['lock']:
             self.state['manual_request'] = False
             self.state['manual_chat_id'] = None
             self.state['manual_start_time'] = None
@@ -598,7 +571,7 @@ class TradingBot:
                                              reply_markup=reply_markup)
 
     async def handle_pair_selection(self, chat_id: int, message_id: int, pair: str):
-        with self.state['lock']:
+        async with self.state['lock']:
             self.state['pair'] = pair
         text = f"✅ Pair set to {pair}."
         keyboard = [
@@ -643,8 +616,6 @@ class TradingBot:
             await self.handle_pair_selection(chat_id, message_id, pair)
 
     async def send_signal(self, chat_id: int, signal_text: str, loading_msg_id: int = None):
-        # Determine tag based on confidence
-        # Extract confidence from signal_text (simplified)
         try:
             conf_line = [l for l in signal_text.split('\n') if "Confidence:" in l][0]
             conf = int(conf_line.split(':')[1].strip().replace('%', ''))
@@ -656,7 +627,6 @@ class TradingBot:
             tag = "✅ Good Setup"
         else:
             tag = "⚠️ Low Confidence"
-        # Add tag to message
         final_text = signal_text + f"\n\n{tag}"
 
         if loading_msg_id:
@@ -679,17 +649,16 @@ class TradingBot:
 
 # ======================= MAIN LOOP =======================
 async def async_scan_for_signal(state, db, bot, manual=False):
-    start_time = datetime.utcnow()
+    start_time = datetime.now(timezone.utc)
     best_signal = None
     best_score = 0
 
     while True:
-        elapsed = (datetime.utcnow() - start_time).total_seconds()
-        if manual and elapsed > 300:  # 5 minutes
+        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        if manual and elapsed > 300:
             if best_signal:
                 return best_signal
             else:
-                # Fallback: create a low-confidence signal
                 return {
                     'pair': state.get('pair', 'BTC/USDT'),
                     'signal': 'CALL',
@@ -698,10 +667,9 @@ async def async_scan_for_signal(state, db, bot, manual=False):
                     'entry_price': 0
                 }
 
-        # Determine pairs to scan
         pairs_to_scan = []
         if not manual:
-            with state['lock']:
+            async with state['lock']:
                 pair = state.get('pair')
             if pair:
                 pairs_to_scan = [pair]
@@ -721,7 +689,7 @@ async def async_scan_for_signal(state, db, bot, manual=False):
 
             if not manual:
                 current_candle = df_1m.index[-1]
-                with state['lock']:
+                async with state['lock']:
                     if state.get('last_candle_time') == current_candle:
                         continue
                     state['last_candle_time'] = current_candle
@@ -744,14 +712,13 @@ async def async_scan_for_signal(state, db, bot, manual=False):
                         if confidence >= CONFIDENCE_THRESHOLD_MANUAL:
                             return best_signal
                 else:
-                    # Auto mode: check duplicate and cooldown
                     last_dir = db.get_last_signal_direction()
                     if last_dir == signal:
                         logging.debug("Duplicate direction, skipping")
                         continue
-                    with state['lock']:
+                    async with state['lock']:
                         last_signal_time = state.get('last_signal_time')
-                    if last_signal_time and (datetime.utcnow() - last_signal_time).total_seconds() < 120:
+                    if last_signal_time and (datetime.now(timezone.utc) - last_signal_time).total_seconds() < 120:
                         logging.debug("Cooldown active")
                         continue
                     return {
@@ -769,14 +736,7 @@ async def async_scan_for_signal(state, db, bot, manual=False):
 
     return best_signal if manual else None
 
-def run_async_scan(state, db, bot, manual=False):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    result = loop.run_until_complete(async_scan_for_signal(state, db, bot, manual))
-    loop.close()
-    return result
-
-def main_loop():
+async def main():
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -788,10 +748,10 @@ def main_loop():
         'pair': None,
         'last_signal_time': None,
         'last_candle_time': None,
-        'lock': threading.Lock(),
+        'lock': asyncio.Lock(),  # Use asyncio.Lock for async operations
         'session_trades': 0,
         'session_losses': 0,
-        'session_start_time': datetime.utcnow(),
+        'session_start_time': datetime.now(timezone.utc),
         'max_trades_per_session': 5,
         'max_losses_per_session': 2,
         'manual_request': False,
@@ -799,31 +759,32 @@ def main_loop():
         'manual_start_time': None,
         'manual_best_signal': None,
         'manual_loading_msg_id': None,
-        'manual_loading_msg_chat': None,
         'current_menu': {},
         'trades_today': 0,
     }
     db = Database()
     bot = TradingBot(TELEGRAM_TOKEN, state, db)
-    bot.start()
-    time.sleep(2)
-
+    
+    # Start Telegram bot in background task
+    bot_task = asyncio.create_task(bot.start())
+    
+    # Main trading loop
     while True:
         try:
             # Handle manual request
-            with state['lock']:
+            async with state['lock']:
                 manual_request = state['manual_request']
                 chat_id = state['manual_chat_id']
                 loading_msg_id = state.get('manual_loading_msg_id')
             if manual_request and chat_id:
-                signal_info = run_async_scan(state, db, bot, manual=True)
-                with state['lock']:
+                signal_info = await async_scan_for_signal(state, db, bot, manual=True)
+                async with state['lock']:
                     state['manual_request'] = False
                     state['manual_chat_id'] = None
                     state['manual_start_time'] = None
                     state['manual_loading_msg_id'] = None
                 if signal_info:
-                    now = datetime.utcnow()
+                    now = datetime.now(timezone.utc)
                     expiry = now + timedelta(minutes=5)
                     note = ""
                     if signal_info['confidence'] < CONFIDENCE_THRESHOLD_MANUAL:
@@ -844,47 +805,38 @@ def main_loop():
                         signal_info['confidence'], signal_info['reason'],
                         signal_info['entry_price'], expiry.isoformat()
                     )
-                    asyncio.run_coroutine_threadsafe(
-                        bot.send_signal(chat_id, msg, loading_msg_id),
-                        bot.loop
-                    )
+                    asyncio.create_task(bot.send_signal(chat_id, msg, loading_msg_id))
                 else:
-                    asyncio.run_coroutine_threadsafe(
-                        bot.send_signal(chat_id, "⚠️ Unexpected error: no signal found. Please try again.", loading_msg_id),
-                        bot.loop
-                    )
-                # Manual cooldown
-                time.sleep(30)
+                    asyncio.create_task(bot.send_signal(chat_id, "⚠️ Unexpected error: no signal found. Please try again.", loading_msg_id))
+                await asyncio.sleep(30)
                 continue
 
             # Auto mode
-            with state['lock']:
+            async with state['lock']:
                 trading_enabled = state['trading_enabled']
                 current_pair = state.get('pair')
             if not trading_enabled or not current_pair:
-                time.sleep(30)
+                await asyncio.sleep(30)
                 continue
 
-            # Session filter
             if not is_session_allowed():
                 logging.debug("Outside session")
-                time.sleep(60)
+                await asyncio.sleep(60)
                 continue
 
-            # Risk limits
-            with state['lock']:
+            async with state['lock']:
                 if state['session_trades'] >= state['max_trades_per_session']:
                     logging.warning("Max trades reached")
-                    time.sleep(60)
+                    await asyncio.sleep(60)
                     continue
                 if state['session_losses'] >= state['max_losses_per_session']:
                     logging.warning("Max losses reached")
-                    time.sleep(60)
+                    await asyncio.sleep(60)
                     continue
 
-            signal_info = run_async_scan(state, db, bot, manual=False)
+            signal_info = await async_scan_for_signal(state, db, bot, manual=False)
             if signal_info:
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
                 expiry = now + timedelta(minutes=5)
                 msg = (
                     "📊 *Signal Alert*\n"
@@ -903,24 +855,21 @@ def main_loop():
                     signal_info['entry_price'], expiry.isoformat()
                 )
                 if TELEGRAM_CHAT_ID:
-                    asyncio.run_coroutine_threadsafe(
-                        bot.send_signal(TELEGRAM_CHAT_ID, msg),
-                        bot.loop
-                    )
+                    asyncio.create_task(bot.send_signal(TELEGRAM_CHAT_ID, msg))
                 else:
                     logging.info(f"Auto signal: {signal_info['signal']} {signal_info['pair']}")
-                with state['lock']:
-                    state['last_signal_time'] = datetime.utcnow()
+                async with state['lock']:
+                    state['last_signal_time'] = datetime.now(timezone.utc)
                     state['session_trades'] += 1
                     state['trades_today'] += 1
             else:
                 logging.debug("No auto signal")
 
-            time.sleep(SCAN_INTERVAL_AUTO)
+            await asyncio.sleep(SCAN_INTERVAL_AUTO)
 
         except Exception as e:
             logging.exception("Main loop error")
-            time.sleep(10)
+            await asyncio.sleep(10)
 
 if __name__ == "__main__":
-    main_loop()
+    asyncio.run(main())
