@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Ultimate Binary Options Trading Signal Bot - Production Ready
+Ultimate Binary Options Trading Signal Bot - Multi‑Category + Timer
+- Full Telegram button control
+- Multi‑category support: Currencies, Crypto, Commodities, Stocks
+- Countdown timer for manual signal generation
+- Guaranteed manual signal within 5 minutes
 - Auto‑restart, watchdog, result tracking
-- Fast scanning (2.5s manual, 8s auto)
-- Multi‑pair concurrency with semaphore
-- Low memory, CPU‑optimized for Termux
-- Full Telegram button control, guaranteed manual signals
+- Optimized for Termux (low CPU, low memory)
 """
 
 import asyncio
@@ -25,20 +26,57 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # ======================= CONFIGURATION =======================
 TELEGRAM_TOKEN = "8553023618:AAH7upKIA9j_zqIYtIhBRKThBOY2HlWe6Ss"  # Replace with your token
 TELEGRAM_CHAT_ID = None
-DATA_TIMEOUT = 6                       # faster timeout
+DATA_TIMEOUT = 6
 BINANCE_BASE_URL = "https://api.binance.com/api/v3"
 
-# Pairs to scan (max 2 for speed)
-AVAILABLE_PAIRS = {
-    "BTC/USDT": "BTCUSDT",
-    "ETH/USDT": "ETHUSDT",
+# ======================= CATEGORIES & PAIRS =======================
+CATEGORIES = {
+    "Currencies": {
+        "USD/PHP": "USDPHP",
+        "EUR/CHF (OTC)": "EURCHF",
+        "EUR/USD (OTC)": "EURUSD",
+        "GBP/USD (OTC)": "GBPUSD",
+        "USD/JPY (OTC)": "USDJPY",
+        "AUD/USD (OTC)": "AUDUSD",
+        "USD/CAD (OTC)": "USDCAD",
+        "NZD/USD (OTC)": "NZDUSD"
+    },
+    "Crypto": {
+        "Bitcoin Cash (OTC)": "BCHUSDT",
+        "Dash (OTC)": "DASHUSDT",
+        "Polkadot (OTC)": "DOTUSDT",
+        "Ethereum (OTC)": "ETHUSDT",
+        "Bitcoin": "BTCUSDT",
+        "Litecoin": "LTCUSDT",
+        "Ripple": "XRPUSDT"
+    },
+    "Commodities": {
+        "Gold (OTC)": "XAUUSDT",
+        "Silver (OTC)": "XAGUSDT",
+        "UKBrent (OTC)": "UKOIL",
+        "USCrude (OTC)": "USOIL"
+    },
+    "Stocks": {
+        "Apple": "AAPL",
+        "Tesla": "TSLA",
+        "Amazon": "AMZN",
+        "Google": "GOOGL",
+        "Microsoft": "MSFT",
+        "Meta": "META"
+    }
 }
 
-# Performance settings – faster scans
+# Global mapping: display name -> symbol
+DISPLAY_TO_SYMBOL = {}
+for cat, pairs in CATEGORIES.items():
+    for display, sym in pairs.items():
+        DISPLAY_TO_SYMBOL[display] = sym
+
+# Performance settings
 MAX_CONCURRENT_FETCH = 2
-CANDLE_LIMIT = 40                      # fewer candles for speed
-SCAN_INTERVAL_AUTO = 8                 # faster auto scanning
-SCAN_INTERVAL_MANUAL = 2.5             # faster manual scanning
+CANDLE_LIMIT = 40
+SCAN_INTERVAL_AUTO = 8
+SCAN_INTERVAL_MANUAL = 2.5
 CONFIDENCE_THRESHOLD_AUTO = 75
 CONFIDENCE_THRESHOLD_MANUAL = 70
 FALLBACK_CONFIDENCE = 50
@@ -116,7 +154,7 @@ def candlestick_strength(df: pd.DataFrame) -> Tuple[str, float]:
             strength += 15
         return 'bearish', min(strength, 100)
 
-# ======================= DATA FETCHER (with semaphore) =======================
+# ======================= DATA FETCHER =======================
 fetch_semaphore = asyncio.Semaphore(MAX_CONCURRENT_FETCH)
 
 async def fetch_candles_async(session, symbol: str, interval: str = '1m', limit: int = CANDLE_LIMIT):
@@ -142,7 +180,13 @@ async def fetch_candles_async(session, symbol: str, interval: str = '1m', limit:
 
 async def fetch_all_candles(pairs: List[str], interval='1m', limit=CANDLE_LIMIT):
     async with aiohttp.ClientSession() as session:
-        tasks = [fetch_candles_async(session, AVAILABLE_PAIRS[pair], interval, limit) for pair in pairs]
+        tasks = []
+        for pair in pairs:
+            symbol = DISPLAY_TO_SYMBOL.get(pair)
+            if symbol is None:
+                logging.error(f"No symbol mapping for {pair}")
+                continue
+            tasks.append(fetch_candles_async(session, symbol, interval, limit))
         results = await asyncio.gather(*tasks, return_exceptions=True)
     data = {}
     for pair, df in zip(pairs, results):
@@ -150,7 +194,7 @@ async def fetch_all_candles(pairs: List[str], interval='1m', limit=CANDLE_LIMIT)
             data[pair] = df
     return data
 
-# ======================= STRATEGY (unchanged logic, only added confidence boosts) =======================
+# ======================= STRATEGY =======================
 def is_session_allowed():
     now = datetime.now(timezone.utc)
     hour = now.hour
@@ -310,7 +354,7 @@ def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto
         confidence += 5
         reasons.append("Strong volatility")
 
-    # ====== EXTRA CONFIDENCE BOOSTS (performance upgrade) ======
+    # Extra confidence boosts
     if details['trend_strength'] > 0.25:
         confidence += 5
         reasons.append("Strong trend strength")
@@ -379,7 +423,7 @@ class Database:
         conn.close()
         return wins, losses
 
-# ======================= TELEGRAM BOT (unchanged UI) =======================
+# ======================= TELEGRAM BOT =======================
 class TradingBot:
     def __init__(self, token: str, state: dict, db: Database):
         self.token = token
@@ -388,19 +432,15 @@ class TradingBot:
         self.app = None
 
     async def start(self):
-        """Run the bot in the main async loop and start polling."""
         self.app = Application.builder().token(self.token).build()
         self.app.add_handler(CommandHandler("start", self.start_command))
         self.app.add_handler(CallbackQueryHandler(self.button_callback))
 
-        # Initialize the application
         await self.app.initialize()
         await self.app.start()
-
-        # Start receiving messages (critical for responsiveness)
         await self.app.updater.start_polling(drop_pending_updates=True)
 
-        # Keep the bot alive (polling runs forever, so this is optional)
+        # Keep alive
         while True:
             await asyncio.sleep(3600)
 
@@ -410,11 +450,13 @@ class TradingBot:
     async def show_main_menu(self, chat_id: int, edit=False, message_id=None):
         async with self.state['lock']:
             trading = self.state['trading_enabled']
+            category = self.state.get('category', 'None')
             pair = self.state.get('pair', 'None')
         mode_text = "🟢 Auto" if trading else "🔴 Manual"
         text = (
             f"🤖 *Smart Trading Assistant*\n"
             f"Mode: {mode_text}\n"
+            f"Category: {category}\n"
             f"Pair: {pair}\n\n"
             "Choose an option:"
         )
@@ -438,6 +480,7 @@ class TradingBot:
 
     async def show_settings_menu(self, chat_id: int, edit=False, message_id=None):
         keyboard = [
+            [InlineKeyboardButton("📂 Select Category", callback_data="select_category")],
             [InlineKeyboardButton("🔄 Select Pair", callback_data="select_pair")],
             [InlineKeyboardButton("⬅️ Back", callback_data="back_main")],
             [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")],
@@ -453,14 +496,37 @@ class TradingBot:
         async with self.state['lock']:
             self.state['current_menu'][chat_id] = 'settings'
 
-    async def show_pair_selection(self, chat_id: int, edit=False, message_id=None):
+    async def show_category_menu(self, chat_id: int, edit=False, message_id=None):
         keyboard = []
-        for pair in AVAILABLE_PAIRS.keys():
+        for cat in CATEGORIES.keys():
+            keyboard.append([InlineKeyboardButton(cat, callback_data=f"category_{cat}")])
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="back_settings")])
+        keyboard.append([InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        text = "📂 *Select Category*"
+        if edit and message_id:
+            await self.app.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id,
+                                                 reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await self.app.bot.send_message(chat_id=chat_id, text=text,
+                                            reply_markup=reply_markup, parse_mode='Markdown')
+        async with self.state['lock']:
+            self.state['current_menu'][chat_id] = 'category_selection'
+
+    async def show_pair_selection(self, chat_id: int, edit=False, message_id=None):
+        async with self.state['lock']:
+            category = self.state.get('category')
+        if not category:
+            await self.show_category_menu(chat_id, edit=edit, message_id=message_id)
+            return
+        pairs = list(CATEGORIES[category].keys())
+        keyboard = []
+        for pair in pairs:
             keyboard.append([InlineKeyboardButton(pair, callback_data=f"pair_{pair}")])
         keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="back_settings")])
         keyboard.append([InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        text = "🔘 *Select Trading Pair*"
+        text = f"🔘 *Select Pair ({category})*"
         if edit and message_id:
             await self.app.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id,
                                                  reply_markup=reply_markup, parse_mode='Markdown')
@@ -473,6 +539,7 @@ class TradingBot:
     async def show_status(self, chat_id: int, edit=False, message_id=None):
         async with self.state['lock']:
             trading = self.state['trading_enabled']
+            category = self.state.get('category', 'None')
             pair = self.state.get('pair', 'None')
             trades_today = self.state.get('trades_today', 0)
         mode = "Auto" if trading else "Manual (inactive)"
@@ -480,6 +547,7 @@ class TradingBot:
             "📊 *Bot Status*\n"
             "━━━━━━━━━━━━━━\n"
             f"Mode: {mode}\n"
+            f"Category: {category}\n"
             f"Pair: {pair}\n"
             f"Trades Today: {trades_today}\n"
             "━━━━━━━━━━━━━━"
@@ -530,7 +598,7 @@ class TradingBot:
         async with self.state['lock']:
             if self.state.get('pair') is None:
                 await self.app.bot.edit_message_text(
-                    "⚠️ Please select a pair first using Settings → Select Pair.",
+                    "⚠️ Please select a category and pair first using Settings → Select Category → Select Pair.",
                     chat_id=chat_id, message_id=message_id
                 )
                 return
@@ -557,22 +625,58 @@ class TradingBot:
         await self.app.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id,
                                              reply_markup=reply_markup)
 
+    async def update_timer(self, chat_id: int, msg_id: int, end_time: datetime):
+        while True:
+            remaining = end_time - datetime.now(timezone.utc)
+            seconds = int(remaining.total_seconds())
+            if seconds <= 0:
+                break
+            minutes = seconds // 60
+            secs = seconds % 60
+            text = f"⏳ Scanning market...\nTime remaining: {minutes:02}:{secs:02}\nSearching best opportunity..."
+            try:
+                await self.app.bot.edit_message_text(
+                    text,
+                    chat_id=chat_id,
+                    message_id=msg_id
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(15)
+
     async def handle_generate_signal(self, chat_id: int, message_id: int):
+        # Check that a pair is selected
+        async with self.state['lock']:
+            if self.state.get('pair') is None:
+                await self.app.bot.edit_message_text(
+                    "⚠️ Please select a category and pair first using Settings → Select Category → Select Pair.",
+                    chat_id=chat_id, message_id=message_id
+                )
+                return
+
+        # Send loading message with cancel button
         keyboard = [
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel_generate")],
             [InlineKeyboardButton("⬅️ Back", callback_data="back_main")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         loading_msg = await self.app.bot.edit_message_text(
-            "⏳ Scanning market... finding best setup (within 5 min)",
+            "⏳ Scanning market... (within 5 min)",
             chat_id=chat_id, message_id=message_id, reply_markup=reply_markup
         )
+
+        # Start timer updater
+        end_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+        asyncio.create_task(self.update_timer(chat_id, loading_msg.message_id, end_time))
+
+        # Set manual request in state
         async with self.state['lock']:
             self.state['manual_request'] = True
             self.state['manual_chat_id'] = chat_id
             self.state['manual_start_time'] = datetime.now(timezone.utc)
             self.state['manual_best_signal'] = None
             self.state['manual_loading_msg_id'] = loading_msg.message_id
+            self.state['manual_end_time'] = end_time
 
     async def handle_cancel_generate(self, chat_id: int, message_id: int):
         async with self.state['lock']:
@@ -581,6 +685,7 @@ class TradingBot:
             self.state['manual_start_time'] = None
             self.state['manual_best_signal'] = None
             self.state['manual_loading_msg_id'] = None
+            self.state['manual_end_time'] = None
         text = "❌ Cancelled"
         keyboard = [
             [InlineKeyboardButton("⚡ Generate Again", callback_data="generate_signal")],
@@ -590,10 +695,31 @@ class TradingBot:
         await self.app.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id,
                                              reply_markup=reply_markup)
 
-    async def handle_pair_selection(self, chat_id: int, message_id: int, pair: str):
+    async def handle_category_selection(self, chat_id: int, message_id: int, category: str):
         async with self.state['lock']:
-            self.state['pair'] = pair
-        text = f"✅ Pair set to {pair}."
+            self.state['category'] = category
+            # Reset pair when category changes
+            self.state['pair'] = None
+        text = f"✅ Category set to {category}.\nNow use Settings → Select Pair to choose a pair."
+        keyboard = [
+            [InlineKeyboardButton("🔘 Select Pair", callback_data="select_pair")],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await self.app.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id,
+                                             reply_markup=reply_markup)
+
+    async def handle_pair_selection(self, chat_id: int, message_id: int, pair_display: str):
+        async with self.state['lock']:
+            category = self.state.get('category')
+            if category is None:
+                await self.app.bot.edit_message_text(
+                    "⚠️ Please select a category first.",
+                    chat_id=chat_id, message_id=message_id
+                )
+                return
+            self.state['pair'] = pair_display
+        text = f"✅ Pair set to {pair_display} (Category: {category})."
         keyboard = [
             [InlineKeyboardButton("🔄 Change Pair", callback_data="select_pair")],
             [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")],
@@ -613,6 +739,8 @@ class TradingBot:
             await self.show_main_menu(chat_id, edit=True, message_id=message_id)
         elif data == "settings":
             await self.show_settings_menu(chat_id, edit=True, message_id=message_id)
+        elif data == "select_category":
+            await self.show_category_menu(chat_id, edit=True, message_id=message_id)
         elif data == "select_pair":
             await self.show_pair_selection(chat_id, edit=True, message_id=message_id)
         elif data == "back_main":
@@ -631,6 +759,9 @@ class TradingBot:
             await self.handle_generate_signal(chat_id, message_id)
         elif data == "cancel_generate":
             await self.handle_cancel_generate(chat_id, message_id)
+        elif data.startswith("category_"):
+            category = data[9:]  # remove "category_"
+            await self.handle_category_selection(chat_id, message_id, category)
         elif data.startswith("pair_"):
             pair = data[5:]
             await self.handle_pair_selection(chat_id, message_id, pair)
@@ -715,12 +846,15 @@ async def async_scan_for_signal(state, db, bot, manual=False):
 
     while True:
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
-        if manual and elapsed > 300:
+        if manual and elapsed > 300:  # 5 minutes
             if best_signal:
                 return best_signal
             else:
+                # Fallback: create a low-confidence signal
+                async with state['lock']:
+                    pair = state.get('pair', 'BTC/USDT')
                 return {
-                    'pair': state.get('pair', 'BTC/USDT'),
+                    'pair': pair,
                     'signal': 'CALL',
                     'confidence': FALLBACK_CONFIDENCE,
                     'reason': 'Fallback signal (safe mode)',
@@ -729,6 +863,7 @@ async def async_scan_for_signal(state, db, bot, manual=False):
 
         pairs_to_scan = []
         if not manual:
+            # Auto mode: only the selected pair
             async with state['lock']:
                 pair = state.get('pair')
             if pair:
@@ -736,8 +871,17 @@ async def async_scan_for_signal(state, db, bot, manual=False):
             else:
                 return None
         else:
-            # manual mode: scan only first 2 pairs for speed
-            pairs_to_scan = list(AVAILABLE_PAIRS.keys())[:2]
+            # Manual mode: all pairs of the selected category (for better chance)
+            async with state['lock']:
+                category = state.get('category')
+            if category:
+                pairs_to_scan = list(CATEGORIES[category].keys())
+            else:
+                pairs_to_scan = []
+
+        if not pairs_to_scan:
+            # No category/pair selected
+            return None
 
         df_1m_data = await fetch_all_candles(pairs_to_scan, '1m', CANDLE_LIMIT)
         df_5m_data = await fetch_all_candles(pairs_to_scan, '5m', CANDLE_LIMIT)
@@ -770,7 +914,7 @@ async def async_scan_for_signal(state, db, bot, manual=False):
                             'reason': reason,
                             'entry_price': df_1m['close'].iloc[-1]
                         }
-                        # return immediately if confidence >= 65 (faster manual mode)
+                        # return immediately if confidence >= 65 (fast manual mode)
                         if confidence >= 65:
                             return best_signal
                 else:
@@ -792,7 +936,7 @@ async def async_scan_for_signal(state, db, bot, manual=False):
                     }
 
         del df_1m_data, df_5m_data
-        gc.collect()   # memory cleanup
+        gc.collect()
 
         if not manual:
             break
@@ -800,7 +944,6 @@ async def async_scan_for_signal(state, db, bot, manual=False):
 
     return best_signal if manual else None
 
-# ======================= MAIN with auto‑restart =======================
 async def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -813,6 +956,7 @@ async def main():
 
     state = {
         'trading_enabled': False,
+        'category': None,
         'pair': None,
         'last_signal_time': None,
         'last_candle_time': None,
@@ -827,9 +971,10 @@ async def main():
         'manual_start_time': None,
         'manual_best_signal': None,
         'manual_loading_msg_id': None,
+        'manual_end_time': None,
         'current_menu': {},
         'trades_today': 0,
-        'last_heartbeat': datetime.now(timezone.utc),   # watchdog
+        'last_heartbeat': datetime.now(timezone.utc),
     }
     db = Database()
     bot = TradingBot(TELEGRAM_TOKEN, state, db)
@@ -837,7 +982,7 @@ async def main():
     # Background tasks
     asyncio.create_task(watchdog(state))
     asyncio.create_task(result_checker(db))
-    asyncio.create_task(bot.start())   # bot runs forever
+    asyncio.create_task(bot.start())
 
     # Main trading loop
     while True:
@@ -846,7 +991,7 @@ async def main():
             async with state['lock']:
                 state['last_heartbeat'] = datetime.now(timezone.utc)
 
-            # Manual request handling
+            # Handle manual request
             async with state['lock']:
                 manual_request = state['manual_request']
                 chat_id = state['manual_chat_id']
@@ -858,6 +1003,7 @@ async def main():
                     state['manual_chat_id'] = None
                     state['manual_start_time'] = None
                     state['manual_loading_msg_id'] = None
+                    state['manual_end_time'] = None
                 if signal_info:
                     now = datetime.now(timezone.utc)
                     expiry = now + timedelta(minutes=5)
@@ -875,10 +1021,20 @@ async def main():
                         "━━━━━━━━━━━━━━\n"
                         f"🧠 Reason: {signal_info['reason']}{note}"
                     )
+                    # Determine category for logging (optional)
+                    category = None
+                    for cat, pairs in CATEGORIES.items():
+                        if signal_info['pair'] in pairs:
+                            category = cat
+                            break
                     db.log_signal(
-                        "CRYPTO", signal_info['pair'], signal_info['signal'],
-                        signal_info['confidence'], signal_info['reason'],
-                        signal_info['entry_price'], expiry.isoformat()
+                        category or "Unknown",
+                        signal_info['pair'],
+                        signal_info['signal'],
+                        signal_info['confidence'],
+                        signal_info['reason'],
+                        signal_info['entry_price'],
+                        expiry.isoformat()
                     )
                     asyncio.create_task(bot.send_signal(chat_id, msg, loading_msg_id))
                 else:
@@ -891,7 +1047,7 @@ async def main():
                 trading_enabled = state['trading_enabled']
                 current_pair = state.get('pair')
             if not trading_enabled or not current_pair:
-                await asyncio.sleep(25)   # idle sleep
+                await asyncio.sleep(25)
                 continue
 
             if not is_session_allowed():
@@ -924,10 +1080,20 @@ async def main():
                     "━━━━━━━━━━━━━━\n"
                     f"🧠 Reason: {signal_info['reason']}"
                 )
+                # Determine category for logging
+                category = None
+                for cat, pairs in CATEGORIES.items():
+                    if signal_info['pair'] in pairs:
+                        category = cat
+                        break
                 db.log_signal(
-                    "CRYPTO", signal_info['pair'], signal_info['signal'],
-                    signal_info['confidence'], signal_info['reason'],
-                    signal_info['entry_price'], expiry.isoformat()
+                    category or "Unknown",
+                    signal_info['pair'],
+                    signal_info['signal'],
+                    signal_info['confidence'],
+                    signal_info['reason'],
+                    signal_info['entry_price'],
+                    expiry.isoformat()
                 )
                 if TELEGRAM_CHAT_ID:
                     asyncio.create_task(bot.send_signal(TELEGRAM_CHAT_ID, msg))
