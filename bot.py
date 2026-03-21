@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-High-Accuracy Binary Options Signal Bot - Strict Strategy
-- Only trade when confidence ≥ 80%
-- No fallback signals
-- Uses EMA 50/200, RSI 14, MACD, support/resistance, multi-timeframe, candle patterns
+High-Accuracy Binary Options Signal Bot - Final Production Version
+- Strict 75%+ confidence, no fallback signals
+- Live timer during manual signal generation
+- 3‑minute entry delay, 5‑minute expiry
+- Fast scanning (1 second interval, up to 10 pairs)
+- Full Telegram button control, back navigation everywhere
 - Optimized for Termux, runs 24/7
-- Full Telegram button control
 """
 
 import asyncio
@@ -30,9 +31,10 @@ DATA_TIMEOUT = 8
 BINANCE_BASE_URL = "https://api.binance.com/api/v3"
 INDIA_TZ = ZoneInfo("Asia/Kolkata")
 
-# ======================= SYMBOL MAPPING =======================
+# ======================= SYMBOL MAPPING & NORMALIZATION =======================
+# Raw mapping from normalized name to Binance symbol
 SYMBOL_MAP = {
-    # Crypto (direct)
+    # Crypto
     "BTCUSDT": "BTCUSDT",
     "ETHUSDT": "ETHUSDT",
     "BNBUSDT": "BNBUSDT",
@@ -51,7 +53,7 @@ SYMBOL_MAP = {
     "LINKUSDT": "LINKUSDT",
     "UNIUSDT": "UNIUSDT",
     "ICPUSDT": "ICPUSDT",
-    # Forex (simulated using crypto – adjust as needed)
+    # Forex (simulated with crypto)
     "EUR/USD": "BTCUSDT",
     "EUR/USD (OTC)": "BTCUSDT",
     "EUR/CHF (OTC)": "ETHUSDT",
@@ -67,21 +69,83 @@ SYMBOL_MAP = {
     "USCrude (OTC)": "SOLUSDT",
 }
 
-# Categories based on mapping keys
-CATEGORIES = {
-    "Crypto": [p for p in SYMBOL_MAP if p.endswith("USDT") and p not in ["EUR/USD", "EUR/CHF (OTC)"]],
-    "Forex": ["EUR/USD", "EUR/CHF (OTC)", "GBP/USD (OTC)", "USD/JPY (OTC)", "AUD/USD (OTC)", "USD/CAD (OTC)", "NZD/USD (OTC)"],
+# Normalization: convert common display names to the keys used in SYMBOL_MAP
+def normalize_pair(pair: str) -> Optional[str]:
+    if pair is None:
+        return None
+    pair = pair.strip()
+    # Direct mapping for common formats
+    mapping = {
+        # Crypto
+        "BTC/USDT": "BTCUSDT",
+        "ETH/USDT": "ETHUSDT",
+        "BNB/USDT": "BNBUSDT",
+        "SOL/USDT": "SOLUSDT",
+        "XRP/USDT": "XRPUSDT",
+        "ADA/USDT": "ADAUSDT",
+        "DOGE/USDT": "DOGEUSDT",
+        "DOT/USDT": "DOTUSDT",
+        "MATIC/USDT": "MATICUSDT",
+        "LTC/USDT": "LTCUSDT",
+        "TRX/USDT": "TRXUSDT",
+        "ETC/USDT": "ETCUSDT",
+        "XLM/USDT": "XLMUSDT",
+        "ATOM/USDT": "ATOMUSDT",
+        "LINK/USDT": "LINKUSDT",
+        "UNI/USDT": "UNIUSDT",
+        "ICP/USDT": "ICPUSDT",
+        # Commodities
+        "Gold": "Gold (OTC)",
+        "Silver": "Silver (OTC)",
+        "Crude": "USCrude (OTC)",
+        "Brent": "UKBrent (OTC)",
+        # Forex
+        "EUR/USD": "EUR/USD",
+        "EUR/CHF": "EUR/CHF (OTC)",
+        "GBP/USD": "GBP/USD (OTC)",
+        "USD/JPY": "USD/JPY (OTC)",
+        "AUD/USD": "AUD/USD (OTC)",
+        "USD/CAD": "USD/CAD (OTC)",
+        "NZD/USD": "NZD/USD (OTC)",
+    }
+    if pair in mapping:
+        return mapping[pair]
+    # If it's already a key in SYMBOL_MAP, return as is
+    if pair in SYMBOL_MAP:
+        return pair
+    # Fallback: remove spaces and return
+    return pair
+
+# Categories – only include pairs that exist in SYMBOL_MAP after normalization
+CATEGORIES = {}
+for cat, raw_pairs in {
+    "Crypto": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT",
+               "AVAXUSDT", "DOTUSDT", "MATICUSDT", "LTCUSDT", "TRXUSDT", "ETCUSDT", "XLMUSDT",
+               "ATOMUSDT", "LINKUSDT", "UNIUSDT", "ICPUSDT"],
+    "Forex": ["EUR/USD", "EUR/CHF (OTC)", "GBP/USD (OTC)", "USD/JPY (OTC)",
+              "AUD/USD (OTC)", "USD/CAD (OTC)", "NZD/USD (OTC)"],
     "Commodities": ["Gold (OTC)", "Silver (OTC)", "UKBrent (OTC)", "USCrude (OTC)"],
-}
+}.items():
+    # Normalize each pair and keep only those with a mapping
+    norm_pairs = []
+    for p in raw_pairs:
+        norm = normalize_pair(p)
+        if norm in SYMBOL_MAP:
+            norm_pairs.append(norm)
+        else:
+            logging.warning(f"Skipping unsupported pair: {p}")
+    if norm_pairs:
+        CATEGORIES[cat] = norm_pairs
 
 # Performance settings
 MAX_CONCURRENT_FETCH = 2
-CANDLE_LIMIT = 100          # enough for EMA 200
+CANDLE_LIMIT = 100
 SCAN_INTERVAL_AUTO = 15
-SCAN_INTERVAL_MANUAL = 3
-CONFIDENCE_THRESHOLD = 80   # Minimum confidence required
-MAX_SCAN_PAIRS_MANUAL = 6
-ENTRY_DELAY_MINUTES = 2     # Delay before entry to give user time
+SCAN_INTERVAL_MANUAL = 1            # fast manual scanning
+CONFIDENCE_THRESHOLD = 75           # minimum required
+MAX_SCAN_PAIRS_MANUAL = 10          # scan up to 10 pairs
+ENTRY_DELAY_MINUTES = 3             # user gets 3 minutes to place trade
+EXPIRY_MINUTES = 5                  # trade duration
 
 # News avoidance time blocks (UTC)
 NEWS_BLOCKS = [
@@ -128,6 +192,15 @@ def compute_atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
     atr = tr.rolling(period).mean()
     return atr.iloc[-1]
 
+def compute_bollinger_bands(series: pd.Series, period: int = 20, std_dev: float = 2):
+    if len(series) < period:
+        return None, None, None
+    middle = series.rolling(window=period).mean()
+    std = series.rolling(window=period).std()
+    upper = middle + std_dev * std
+    lower = middle - std_dev * std
+    return upper.iloc[-1], middle.iloc[-1], lower.iloc[-1]
+
 def support_resistance(df: pd.DataFrame, window=20):
     if len(df) < window:
         return None, None
@@ -136,7 +209,6 @@ def support_resistance(df: pd.DataFrame, window=20):
     return recent_low, recent_high
 
 def candlestick_pattern(df: pd.DataFrame) -> Tuple[str, float]:
-    """Detect strong patterns: engulfing, rejection wick, momentum."""
     if len(df) < 2:
         return 'none', 0
     last = df.iloc[-1]
@@ -159,9 +231,9 @@ def candlestick_pattern(df: pd.DataFrame) -> Tuple[str, float]:
     # Rejection wick (long wick opposite to direction)
     upper_wick = high - max(open_p, close)
     lower_wick = min(open_p, close) - low
-    if upper_wick > body * 2 and close < open_p:   # bearish rejection
+    if upper_wick > body * 2 and close < open_p:
         return 'bearish_rejection', 75
-    if lower_wick > body * 2 and close > open_p:   # bullish rejection
+    if lower_wick > body * 2 and close > open_p:
         return 'bullish_rejection', 75
     # Momentum candle (large body)
     if body / (high - low) > 0.7:
@@ -170,6 +242,128 @@ def candlestick_pattern(df: pd.DataFrame) -> Tuple[str, float]:
         else:
             return 'bearish_momentum', 70
     return 'none', 0
+
+def volatility_filter(df_1m: pd.DataFrame) -> bool:
+    atr = compute_atr(df_1m, 14)
+    if atr is None:
+        return False
+    price = df_1m['close'].iloc[-1]
+    atr_pct = atr / price * 100
+    if atr_pct < 0.2:
+        return False
+    upper, middle, lower = compute_bollinger_bands(df_1m['close'], 20, 2)
+    if upper is None or lower is None:
+        return False
+    bb_width = (upper - lower) / middle * 100 if middle != 0 else 0
+    if bb_width < 0.5:
+        return False
+    return True
+
+# ======================= STRATEGY =======================
+def is_session_allowed():
+    now = datetime.now(timezone.utc)
+    hour = now.hour
+    london = 8 <= hour < 16
+    newyork = 13 <= hour < 21
+    return london or newyork
+
+def news_filter() -> bool:
+    now = datetime.now(timezone.utc)
+    for start_h, start_m, end_h, end_m in NEWS_BLOCKS:
+        start = datetime(now.year, now.month, now.day, start_h, start_m, tzinfo=timezone.utc)
+        end = datetime(now.year, now.month, now.day, end_h, end_m, tzinfo=timezone.utc)
+        if start <= now <= end:
+            return True
+    return False
+
+def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame) -> Tuple[str, int, str, Dict]:
+    details = {}
+    if df_1m.empty or df_5m.empty:
+        return 'WAIT', 0, "Missing data", details
+    if len(df_1m) < 200 or len(df_5m) < 200:
+        return 'WAIT', 0, "Insufficient data for EMA 200", details
+
+    # 1m indicators
+    close_1m = df_1m['close']
+    ema50_1m = compute_ema(close_1m, 50)
+    ema200_1m = compute_ema(close_1m, 200)
+    rsi_1m = compute_rsi(close_1m, 14)
+    macd_line_1m, signal_line_1m, hist_1m = compute_macd(close_1m, 12, 26, 9)
+    # 5m indicators
+    close_5m = df_5m['close']
+    ema50_5m = compute_ema(close_5m, 50)
+    ema200_5m = compute_ema(close_5m, 200)
+    rsi_5m = compute_rsi(close_5m, 14)
+    macd_line_5m, signal_line_5m, hist_5m = compute_macd(close_5m, 12, 26, 9)
+    # Support/resistance
+    support, resistance = support_resistance(df_1m, 20)
+    # Candle pattern
+    pattern, pattern_score = candlestick_pattern(df_1m)
+
+    if any(v is None for v in [ema50_1m, ema200_1m, rsi_1m, macd_line_1m, signal_line_1m,
+                               ema50_5m, ema200_5m, rsi_5m, macd_line_5m, signal_line_5m]):
+        return 'WAIT', 0, "Indicator failed", details
+
+    # Trend
+    trend_bullish = ema50_1m > ema200_1m and ema50_5m > ema200_5m
+    trend_bearish = ema50_1m < ema200_1m and ema50_5m < ema200_5m
+    if not (trend_bullish or trend_bearish):
+        return 'WAIT', 0, "No clear trend (EMAs mixed)", details
+
+    # RSI
+    if trend_bullish:
+        if not (rsi_1m < 30 and rsi_5m < 30):
+            return 'WAIT', 0, "RSI not oversold for CALL", details
+    else:
+        if not (rsi_1m > 70 and rsi_5m > 70):
+            return 'WAIT', 0, "RSI not overbought for PUT", details
+
+    # MACD
+    macd_bullish = (macd_line_1m > signal_line_1m and hist_1m > 0) and (macd_line_5m > signal_line_5m and hist_5m > 0)
+    macd_bearish = (macd_line_1m < signal_line_1m and hist_1m < 0) and (macd_line_5m < signal_line_5m and hist_5m < 0)
+    if trend_bullish and not macd_bullish:
+        return 'WAIT', 0, "MACD not bullish", details
+    if trend_bearish and not macd_bearish:
+        return 'WAIT', 0, "MACD not bearish", details
+
+    # Support/resistance
+    price = close_1m.iloc[-1]
+    if trend_bullish and support is not None and price > support * 1.01:
+        return 'WAIT', 0, "Not near support level", details
+    if trend_bearish and resistance is not None and price < resistance * 0.99:
+        return 'WAIT', 0, "Not near resistance level", details
+
+    # Volatility filter
+    if not volatility_filter(df_1m):
+        return 'WAIT', 0, "Low volatility", details
+
+    # Candle pattern
+    if trend_bullish and pattern not in ['bullish_engulfing', 'bullish_rejection', 'bullish_momentum']:
+        return 'WAIT', 0, f"No bullish candle pattern ({pattern})", details
+    if trend_bearish and pattern not in ['bearish_engulfing', 'bearish_rejection', 'bearish_momentum']:
+        return 'WAIT', 0, f"No bearish candle pattern ({pattern})", details
+
+    # Confidence (all conditions passed)
+    confidence = 80  # Base confidence after passing all filters
+    reasons = [
+        "EMA 50/200 aligned",
+        f"RSI {'oversold' if trend_bullish else 'overbought'}",
+        "MACD confirms",
+        "Near key level",
+        f"Candle pattern: {pattern}",
+        "Volatility acceptable"
+    ]
+    # Add a small bonus for strong patterns
+    if pattern_score >= 80:
+        confidence += 5
+        reasons.append("Strong pattern")
+    confidence = min(confidence, 100)
+
+    signal = 'CALL' if trend_bullish else 'PUT'
+    if confidence >= CONFIDENCE_THRESHOLD:
+        return signal, confidence, ", ".join(reasons), details
+    else:
+        return 'WAIT', confidence, f"Confidence {confidence} < {CONFIDENCE_THRESHOLD}", details
 
 # ======================= DATA FETCHER =======================
 fetch_semaphore = asyncio.Semaphore(MAX_CONCURRENT_FETCH)
@@ -209,10 +403,12 @@ async def fetch_all_candles(pairs: List[str], interval='1m', limit=CANDLE_LIMIT)
     async with aiohttp.ClientSession() as session:
         tasks = []
         for pair in pairs:
-            symbol = SYMBOL_MAP.get(pair)
-            if not symbol:
-                logging.warning(f"No symbol mapping for {pair}, skipping")
+            # Normalize and map to symbol
+            norm = normalize_pair(pair)
+            if norm is None or norm not in SYMBOL_MAP:
+                logging.warning(f"No symbol mapping for {pair} (normalized: {norm})")
                 continue
+            symbol = SYMBOL_MAP[norm]
             tasks.append(fetch_candles_async(session, symbol, interval, limit))
         results = await asyncio.gather(*tasks, return_exceptions=True)
     data = {}
@@ -220,153 +416,6 @@ async def fetch_all_candles(pairs: List[str], interval='1m', limit=CANDLE_LIMIT)
         if isinstance(df, pd.DataFrame) and not df.empty:
             data[pair] = df
     return data
-
-# ======================= STRATEGY =======================
-def is_session_allowed():
-    now = datetime.now(timezone.utc)
-    hour = now.hour
-    london = 8 <= hour < 16
-    newyork = 13 <= hour < 21
-    return london or newyork
-
-def news_filter() -> bool:
-    now = datetime.now(timezone.utc)
-    for start_h, start_m, end_h, end_m in NEWS_BLOCKS:
-        start = datetime(now.year, now.month, now.day, start_h, start_m, tzinfo=timezone.utc)
-        end = datetime(now.year, now.month, now.day, end_h, end_m, tzinfo=timezone.utc)
-        if start <= now <= end:
-            return True
-    return False
-
-def volatility_filter(df_1m: pd.DataFrame) -> bool:
-    """Avoid low volatility using ATR and Bollinger width."""
-    atr = compute_atr(df_1m, 14)
-    if atr is None:
-        return False
-    price = df_1m['close'].iloc[-1]
-    atr_pct = atr / price * 100
-    # Reject if ATR < 0.2% of price
-    if atr_pct < 0.2:
-        return False
-    # Bollinger width
-    upper, middle, lower = compute_bollinger_bands(df_1m['close'], 20, 2)
-    if upper is None or lower is None:
-        return False
-    bb_width = (upper - lower) / middle * 100 if middle != 0 else 0
-    if bb_width < 0.5:
-        return False
-    return True
-
-def compute_bollinger_bands(series: pd.Series, period: int = 20, std_dev: float = 2):
-    if len(series) < period:
-        return None, None, None
-    middle = series.rolling(window=period).mean()
-    std = series.rolling(window=period).std()
-    upper = middle + std_dev * std
-    lower = middle - std_dev * std
-    return upper.iloc[-1], middle.iloc[-1], lower.iloc[-1]
-
-def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame) -> Tuple[str, int, str, Dict]:
-    """
-    Strict strategy with 80% confidence threshold.
-    Returns (signal, confidence, reason, details)
-    """
-    details = {}
-    if df_1m.empty or df_5m.empty:
-        return 'WAIT', 0, "Missing data", details
-    if len(df_1m) < 200 or len(df_5m) < 200:
-        return 'WAIT', 0, "Insufficient data for EMA 200", details
-
-    # 1m indicators
-    close_1m = df_1m['close']
-    ema50_1m = compute_ema(close_1m, 50)
-    ema200_1m = compute_ema(close_1m, 200)
-    rsi_1m = compute_rsi(close_1m, 14)
-    macd_line_1m, signal_line_1m, hist_1m = compute_macd(close_1m, 12, 26, 9)
-    # 5m indicators
-    close_5m = df_5m['close']
-    ema50_5m = compute_ema(close_5m, 50)
-    ema200_5m = compute_ema(close_5m, 200)
-    rsi_5m = compute_rsi(close_5m, 14)
-    macd_line_5m, signal_line_5m, hist_5m = compute_macd(close_5m, 12, 26, 9)
-    # Support/resistance
-    support, resistance = support_resistance(df_1m, 20)
-    # Candle pattern
-    pattern, pattern_score = candlestick_pattern(df_1m)
-
-    # Check for None
-    if any(v is None for v in [ema50_1m, ema200_1m, rsi_1m, macd_line_1m, signal_line_1m,
-                               ema50_5m, ema200_5m, rsi_5m, macd_line_5m, signal_line_5m]):
-        return 'WAIT', 0, "Indicator failed", details
-
-    # Determine trend from EMAs
-    trend_bullish = ema50_1m > ema200_1m and ema50_5m > ema200_5m
-    trend_bearish = ema50_1m < ema200_1m and ema50_5m < ema200_5m
-    if not (trend_bullish or trend_bearish):
-        return 'WAIT', 0, "No clear trend (EMAs mixed)", details
-
-    # RSI confirmation
-    if trend_bullish:
-        if not (rsi_1m < 30 and rsi_5m < 30):
-            return 'WAIT', 0, "RSI not oversold for CALL", details
-    else:
-        if not (rsi_1m > 70 and rsi_5m > 70):
-            return 'WAIT', 0, "RSI not overbought for PUT", details
-
-    # MACD crossover confirmation
-    macd_bullish = (macd_line_1m > signal_line_1m and hist_1m > 0) and (macd_line_5m > signal_line_5m and hist_5m > 0)
-    macd_bearish = (macd_line_1m < signal_line_1m and hist_1m < 0) and (macd_line_5m < signal_line_5m and hist_5m < 0)
-    if trend_bullish and not macd_bullish:
-        return 'WAIT', 0, "MACD not bullish", details
-    if trend_bearish and not macd_bearish:
-        return 'WAIT', 0, "MACD not bearish", details
-
-    # Support/resistance filter: trade only near support for CALL, near resistance for PUT
-    price = close_1m.iloc[-1]
-    if trend_bullish and support is not None and price > support * 1.01:
-        return 'WAIT', 0, "Not near support level", details
-    if trend_bearish and resistance is not None and price < resistance * 0.99:
-        return 'WAIT', 0, "Not near resistance level", details
-
-    # Volatility filter
-    if not volatility_filter(df_1m):
-        return 'WAIT', 0, "Low volatility", details
-
-    # Candle pattern confirmation
-    if trend_bullish and pattern not in ['bullish_engulfing', 'bullish_rejection', 'bullish_momentum']:
-        return 'WAIT', 0, f"No bullish candle pattern ({pattern})", details
-    if trend_bearish and pattern not in ['bearish_engulfing', 'bearish_rejection', 'bearish_momentum']:
-        return 'WAIT', 0, f"No bearish candle pattern ({pattern})", details
-
-    # Multi-timeframe confirmation already used in trend and MACD
-    # Build confidence score (all conditions passed)
-    confidence = 0
-    reasons = []
-    # EMA trend aligned (must have passed)
-    confidence += 20
-    reasons.append("EMA 50/200 aligned")
-    # RSI confirmation (passed)
-    confidence += 20
-    reasons.append(f"RSI {'oversold' if trend_bullish else 'overbought'}")
-    # MACD confirmation (passed)
-    confidence += 20
-    reasons.append("MACD confirms")
-    # Support/resistance confirmation (passed)
-    confidence += 20
-    reasons.append("Near key level")
-    # Candle pattern (passed)
-    confidence += 20
-    reasons.append(f"Candle pattern: {pattern}")
-    # Volatility filter passed (implicit)
-    # Total 100% possible, but we cap at 100
-    confidence = min(100, confidence)
-
-    signal = 'CALL' if trend_bullish else 'PUT'
-    # Final confidence must be at least 80
-    if confidence >= CONFIDENCE_THRESHOLD:
-        return signal, confidence, ", ".join(reasons), details
-    else:
-        return 'WAIT', confidence, f"Confidence {confidence} < {CONFIDENCE_THRESHOLD}", details
 
 # ======================= DATABASE =======================
 class Database:
@@ -525,13 +574,25 @@ class TradingBot:
             await self.show_category_menu(chat_id, edit=edit, message_id=message_id)
             return
         pairs = CATEGORIES.get(category, [])
-        # Filter only pairs that exist in SYMBOL_MAP
-        pairs = [p for p in pairs if p in SYMBOL_MAP]
+        # Normalize again to ensure mapping exists
+        valid_pairs = []
+        for p in pairs:
+            norm = normalize_pair(p)
+            if norm in SYMBOL_MAP:
+                valid_pairs.append(p)
+            else:
+                logging.warning(f"Skipping {p} (no symbol mapping)")
+        if not valid_pairs:
+            await self.app.bot.edit_message_text(
+                "⚠️ No valid pairs available in this category.",
+                chat_id=chat_id, message_id=message_id
+            )
+            return
         keyboard = []
-        for i in range(0, len(pairs), 2):
+        for i in range(0, len(valid_pairs), 2):
             row = []
-            for j in range(i, min(i+2, len(pairs))):
-                row.append(InlineKeyboardButton(pairs[j], callback_data=f"pair_{pairs[j]}"))
+            for j in range(i, min(i+2, len(valid_pairs))):
+                row.append(InlineKeyboardButton(valid_pairs[j], callback_data=f"pair_{valid_pairs[j]}"))
             keyboard.append(row)
         keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="back_settings")])
         keyboard.append([InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")])
@@ -635,6 +696,29 @@ class TradingBot:
         await self.app.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id,
                                              reply_markup=reply_markup)
 
+    async def update_timer(self, chat_id: int, msg_id: int):
+        """Update timer message every 5 seconds for 2 minutes."""
+        for remaining in range(120, 0, -5):
+            minutes = remaining // 60
+            seconds = remaining % 60
+            text = (
+                f"⏳ *Scanning market...*\n\n"
+                f"Time remaining: {minutes:02}:{seconds:02}\n\n"
+                f"Searching best opportunity..."
+            )
+            try:
+                await self.app.bot.edit_message_text(
+                    text,
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    parse_mode='Markdown'
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+        # After timer ends, let the scan continue; the scan itself will send the final result.
+        # No need to send "timeout" here because the scan will return a signal or a message.
+
     async def handle_generate_signal(self, chat_id: int, message_id: int):
         async with self.state['lock']:
             if self.state.get('pair') is None:
@@ -644,6 +728,7 @@ class TradingBot:
                 )
                 return
 
+        # Show loading message with timer and buttons
         keyboard = [
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel_generate")],
             [InlineKeyboardButton("⬅️ Back", callback_data="back_main")],
@@ -651,9 +736,11 @@ class TradingBot:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         loading_msg = await self.app.bot.edit_message_text(
-            "⏳ Scanning market for high-confidence signal...",
-            chat_id=chat_id, message_id=message_id, reply_markup=reply_markup
+            "⏳ Scanning market...\n\nTime remaining: 02:00\n\nSearching best opportunity...",
+            chat_id=chat_id, message_id=message_id, reply_markup=reply_markup, parse_mode='Markdown'
         )
+        # Start timer task
+        asyncio.create_task(self.update_timer(chat_id, loading_msg.message_id))
 
         async with self.state['lock']:
             self.state['manual_request'] = True
@@ -770,14 +857,13 @@ class TradingBot:
 # ======================= WATCHDOG =======================
 async def watchdog(state):
     while True:
-        await asyncio.sleep(30)  # check every 30 seconds
+        await asyncio.sleep(30)
         async with state['lock']:
             last = state.get('last_heartbeat')
         if last:
             delay = (datetime.now(timezone.utc) - last).total_seconds()
             if delay > 180:
                 logging.warning("WATCHDOG ALERT: BOT FROZEN – no heartbeat for 3 minutes")
-        # Heartbeat is updated in main loop every cycle
 
 # ======================= RESULT CHECKER =======================
 async def result_checker(db):
@@ -835,18 +921,18 @@ async def async_scan_for_signal(state, db, bot, manual=False):
 
     while True:
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
-        if manual and elapsed > 300:
+        if manual and elapsed > 120:  # 2 minutes max
             if best_signal:
                 return best_signal
             else:
-                # No signal found within 5 minutes – return nothing, no fallback
+                # No high-confidence signal found – return None, we'll send a message
                 return None
 
         pairs_to_scan = []
         if not manual:
             async with state['lock']:
                 pair = state.get('pair')
-            if pair and pair in SYMBOL_MAP:
+            if pair and normalize_pair(pair) in SYMBOL_MAP:
                 pairs_to_scan = [pair]
             else:
                 return None
@@ -855,16 +941,16 @@ async def async_scan_for_signal(state, db, bot, manual=False):
                 category = state.get('category')
             if category:
                 all_pairs = CATEGORIES.get(category, [])
-                # Filter only mapped pairs
-                all_pairs = [p for p in all_pairs if p in SYMBOL_MAP]
-                pairs_to_scan = all_pairs[:MAX_SCAN_PAIRS_MANUAL]
+                # Filter only pairs that have a valid mapping
+                valid_pairs = [p for p in all_pairs if normalize_pair(p) in SYMBOL_MAP]
+                pairs_to_scan = valid_pairs[:MAX_SCAN_PAIRS_MANUAL]
             else:
                 pairs_to_scan = []
 
         if not pairs_to_scan:
             return None
 
-        # News filter (skip during news)
+        # News filter
         if news_filter():
             logging.debug("News block active, skipping scan")
             await asyncio.sleep(60)
@@ -899,11 +985,11 @@ async def async_scan_for_signal(state, db, bot, manual=False):
                             'reason': reason,
                             'entry_price': df_1m['close'].iloc[-1]
                         }
-                        # If confidence is already >=80, we can return immediately
+                        # If already ≥ threshold, return immediately
                         if confidence >= CONFIDENCE_THRESHOLD:
                             return best_signal
                 else:
-                    # Auto mode: also check duplicate direction
+                    # Auto mode: duplicate and cooldown
                     last_dir = db.get_last_signal_direction()
                     if last_dir == signal:
                         logging.debug("Duplicate direction, skipping")
@@ -935,7 +1021,7 @@ def compute_entry_and_expiry(now: datetime):
     entry = entry.replace(second=0, microsecond=0)
     if entry <= now:
         entry += timedelta(minutes=1)
-    expiry = entry + timedelta(minutes=5)   # 5 min expiry
+    expiry = entry + timedelta(minutes=EXPIRY_MINUTES)
     return entry, expiry
 
 def format_time_ist(dt_utc: datetime) -> str:
@@ -1030,8 +1116,12 @@ async def main():
                     )
                     asyncio.create_task(bot.send_signal(chat_id, msg, loading_msg_id))
                 else:
-                    # No signal found – send informative message (but not a fallback)
-                    asyncio.create_task(bot.send_signal(chat_id, "⚠️ No high-confidence signal found. Please try again later.", loading_msg_id))
+                    # No high-confidence signal found – send a message
+                    asyncio.create_task(bot.send_signal(
+                        chat_id,
+                        "⚠️ Market conditions not clear.\nNo safe signal found.\nTry again in 1-2 minutes.",
+                        loading_msg_id
+                    ))
                 await asyncio.sleep(30)
                 continue
 
