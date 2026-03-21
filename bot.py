@@ -438,9 +438,12 @@ class TradingBot:
 
         await self.app.initialize()
         await self.app.start()
+
+        # start receiving messages
+        await self.app.bot.initialize()
         await self.app.updater.start_polling(drop_pending_updates=True)
 
-        # Keep alive
+        # keep bot alive
         while True:
             await asyncio.sleep(3600)
 
