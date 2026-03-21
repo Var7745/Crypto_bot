@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Ultimate Binary Options Trading Signal Bot - Timezone Fix (IST)
-- All times displayed in Indian Standard Time (UTC+5:30)
-- Internal logic remains in UTC
-- 50+ pairs, turbo mode, news filters, auto rotation
-- Full Telegram button control
+Ultimate Binary Options Trading Signal Bot - Final Version
+- Entry time buffer (2 min normal, 1 min turbo)
+- Times displayed in Indian Standard Time (IST)
+- Full Telegram button control, back navigation everywhere
+- 50+ pairs, auto rotation, strongest pair selection
+- News avoidance, volatility filters, turbo mode
+- Auto‑restart, watchdog, result tracking
+- Optimized for Termux (low CPU, low memory)
 """
 
 import asyncio
@@ -23,7 +26,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 # ======================= CONFIGURATION =======================
-TELEGRAM_TOKEN = "8553023618:AAH7upKIA9j_zqIYtIhBRKThBOY2HlWe6Ss"  # Replace with your token
+TELEGRAM_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your bot token
 TELEGRAM_CHAT_ID = None
 DATA_TIMEOUT = 6
 BINANCE_BASE_URL = "https://api.binance.com/api/v3"
@@ -82,7 +85,6 @@ for category, pairs in CATEGORIES.items():
 
 # ======================= TIME HELPERS =======================
 def format_time_ist(dt_utc: datetime) -> str:
-    """Convert UTC datetime to IST and format as HH:MM."""
     local = dt_utc.astimezone(INDIA_TZ)
     return local.strftime('%H:%M')
 
@@ -97,7 +99,9 @@ FALLBACK_CONFIDENCE = 50
 
 TURBO_CONFIDENCE_THRESHOLD = 60
 TURBO_SCAN_INTERVAL = 1.5
-TURBO_EXPIRY_MINUTES = 1
+TURBO_EXPIRY_MINUTES = 1          # expiry duration after entry
+ENTRY_DELAY_MINUTES = 2            # delay before entry (normal mode)
+TURBO_ENTRY_DELAY_MINUTES = 1      # delay before entry (turbo mode)
 
 MAX_SCAN_PAIRS_MANUAL = 6
 
@@ -107,7 +111,6 @@ NEWS_BLOCKS = [
 ]
 
 # ======================= INDICATORS =======================
-# (unchanged, omitted for brevity – same as previous code)
 def compute_ema(series: pd.Series, period: int) -> Optional[float]:
     if len(series) < period:
         return None
@@ -248,9 +251,6 @@ def news_filter() -> bool:
     return False
 
 def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto', turbo: bool = False) -> Tuple[str, int, str, Dict]:
-    # (unchanged, same as previous final code)
-    # We'll keep the previous implementation here for brevity, but it's the same.
-    # For completeness, include the full function from the last version.
     details = {}
     if df_1m.empty or df_5m.empty:
         return 'WAIT', 0, "Missing data", details
@@ -691,7 +691,7 @@ class TradingBot:
                 break
             minutes = seconds // 60
             secs = seconds % 60
-            text = f"⏳ Scanning market...\nTime remaining: {minutes:02}:{secs:02}\nSearching best opportunity..."
+            text = f"⏳ Scanning market...\n\nNext signal will start after delay\n\nTime remaining: {minutes:02}:{secs:02}\n\nYou will have time to execute trade"
             try:
                 await self.app.bot.edit_message_text(
                     text,
@@ -719,11 +719,12 @@ class TradingBot:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         loading_msg = await self.app.bot.edit_message_text(
-            "⏳ Scanning market... (within 5 min)",
+            "⏳ Scanning market...\n\nNext signal will start after delay\n\nYou will have time to execute trade",
             chat_id=chat_id, message_id=message_id, reply_markup=reply_markup
         )
 
-        end_time = datetime.now(timezone.utc) + timedelta(minutes=TURBO_EXPIRY_MINUTES if turbo else 5)
+        # Calculate end time for scanning (max 5 minutes from now)
+        end_time = datetime.now(timezone.utc) + timedelta(minutes=5)
         asyncio.create_task(self.update_timer(chat_id, loading_msg.message_id, end_time, turbo))
 
         async with self.state['lock']:
@@ -789,9 +790,9 @@ class TradingBot:
             self.state['turbo_mode'] = not self.state.get('turbo_mode', False)
             turbo = self.state['turbo_mode']
         if turbo:
-            text = "⚡ Turbo Mode ENABLED\n\n- Signals generated faster\n- 1-minute expiry\n- Slightly relaxed confidence threshold"
+            text = "⚡ Turbo Mode ENABLED\n\n- Signals generated faster\n- 1-minute expiry after entry delay\n- Slightly relaxed confidence threshold\n- Entry delay reduced to 1 minute"
         else:
-            text = "⚡ Turbo Mode DISABLED\n\nNormal mode restored (5-minute expiry, strict confidence)."
+            text = "⚡ Turbo Mode DISABLED\n\nNormal mode restored (5-minute expiry, 2-minute entry delay, strict confidence)."
         keyboard = [
             [InlineKeyboardButton("⬅️ Back", callback_data="back_settings")],
             [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")],
@@ -1039,6 +1040,19 @@ async def async_scan_for_signal(state, db, bot, manual=False):
 
     return best_signal if manual else None
 
+# ======================= SIGNAL HELPER (Entry delay) =======================
+def compute_entry_and_expiry(turbo: bool, now: datetime):
+    delay = TURBO_ENTRY_DELAY_MINUTES if turbo else ENTRY_DELAY_MINUTES
+    entry = now + timedelta(minutes=delay)
+    # round to next minute
+    entry = entry.replace(second=0, microsecond=0)
+    if entry <= now:
+        entry += timedelta(minutes=1)
+    expiry_minutes = TURBO_EXPIRY_MINUTES if turbo else 5
+    expiry = entry + timedelta(minutes=expiry_minutes)
+    return entry, expiry
+
+# ======================= MAIN =======================
 async def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -1087,6 +1101,7 @@ async def main():
             async with state['lock']:
                 state['last_heartbeat'] = datetime.now(timezone.utc)
 
+            # Manual signal request
             async with state['lock']:
                 manual_request = state['manual_request']
                 chat_id = state['manual_chat_id']
@@ -1101,9 +1116,11 @@ async def main():
                     state['manual_end_time'] = None
                 if signal_info:
                     now = datetime.now(timezone.utc)
-                    expiry = now + timedelta(minutes=TURBO_EXPIRY_MINUTES if state.get('turbo_mode') else 5)
+                    turbo = state.get('turbo_mode', False)
+                    entry_time, expiry_time = compute_entry_and_expiry(turbo, now)
                     note = ""
-                    if signal_info['confidence'] < (TURBO_CONFIDENCE_THRESHOLD if state.get('turbo_mode') else CONFIDENCE_THRESHOLD_MANUAL):
+                    threshold = TURBO_CONFIDENCE_THRESHOLD if turbo else CONFIDENCE_THRESHOLD_MANUAL
+                    if signal_info['confidence'] < threshold:
                         note = "\n⚠️ *Best available signal (confidence below threshold)*"
                     msg = (
                         "📊 *Signal Alert*\n"
@@ -1111,8 +1128,8 @@ async def main():
                         f"📈 Pair: {signal_info['pair']}\n"
                         f"📢 Signal: `{signal_info['signal']}`\n"
                         f"📊 Confidence: {signal_info['confidence']}%\n"
-                        f"⏱ Entry: {format_time_ist(now)}\n"
-                        f"⌛ Expiry: {format_time_ist(expiry)}\n"
+                        f"⏱ Entry: {format_time_ist(entry_time)}\n"
+                        f"⌛ Expiry: {format_time_ist(expiry_time)}\n"
                         "━━━━━━━━━━━━━━\n"
                         f"🧠 Reason: {signal_info['reason']}{note}"
                     )
@@ -1128,7 +1145,7 @@ async def main():
                         signal_info['confidence'],
                         signal_info['reason'],
                         signal_info['entry_price'],
-                        expiry.isoformat()
+                        expiry_time.isoformat()
                     )
                     asyncio.create_task(bot.send_signal(chat_id, msg, loading_msg_id))
                 else:
@@ -1136,6 +1153,7 @@ async def main():
                 await asyncio.sleep(30)
                 continue
 
+            # Auto mode
             async with state['lock']:
                 trading_enabled = state['trading_enabled']
                 current_pair = state.get('pair')
@@ -1166,15 +1184,15 @@ async def main():
             signal_info = await async_scan_for_signal(state, db, bot, manual=False)
             if signal_info:
                 now = datetime.now(timezone.utc)
-                expiry = now + timedelta(minutes=5)
+                entry_time, expiry_time = compute_entry_and_expiry(False, now)  # auto mode never uses turbo
                 msg = (
                     "📊 *Signal Alert*\n"
                     "━━━━━━━━━━━━━━\n"
                     f"📈 Pair: {signal_info['pair']}\n"
                     f"📢 Signal: `{signal_info['signal']}`\n"
                     f"📊 Confidence: {signal_info['confidence']}%\n"
-                    f"⏱ Entry: {format_time_ist(now)}\n"
-                    f"⌛ Expiry: {format_time_ist(expiry)}\n"
+                    f"⏱ Entry: {format_time_ist(entry_time)}\n"
+                    f"⌛ Expiry: {format_time_ist(expiry_time)}\n"
                     "━━━━━━━━━━━━━━\n"
                     f"🧠 Reason: {signal_info['reason']}"
                 )
@@ -1190,7 +1208,7 @@ async def main():
                     signal_info['confidence'],
                     signal_info['reason'],
                     signal_info['entry_price'],
-                    expiry.isoformat()
+                    expiry_time.isoformat()
                 )
                 if TELEGRAM_CHAT_ID:
                     asyncio.create_task(bot.send_signal(TELEGRAM_CHAT_ID, msg))
