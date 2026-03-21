@@ -388,19 +388,21 @@ class TradingBot:
         self.app = None
 
     async def start(self):
-        """Run the bot in the main async loop without creating a new event loop"""
+        """Run the bot in the main async loop and start polling."""
         self.app = Application.builder().token(self.token).build()
         self.app.add_handler(CommandHandler("start", self.start_command))
         self.app.add_handler(CallbackQueryHandler(self.button_callback))
 
-        # Fixed Telegram polling – no extra event loop
+        # Initialize the application
         await self.app.initialize()
         await self.app.start()
-        await self.app.bot.initialize()
-        await self.app.bot.get_me()
 
-        # Keep the bot running
-        await asyncio.Event().wait()
+        # Start receiving messages (critical for responsiveness)
+        await self.app.updater.start_polling(drop_pending_updates=True)
+
+        # Keep the bot alive (polling runs forever, so this is optional)
+        while True:
+            await asyncio.sleep(3600)
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await self.show_main_menu(update.message.chat_id, edit=False)
