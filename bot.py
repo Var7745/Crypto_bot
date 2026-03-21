@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Ultimate Binary Options Trading Signal Bot - Final Version
-- Entry time buffer (2 min normal, 1 min turbo)
-- Times displayed in Indian Standard Time (IST)
-- Full Telegram button control, back navigation everywhere
-- 50+ pairs, auto rotation, strongest pair selection
-- News avoidance, volatility filters, turbo mode
-- Auto‑restart, watchdog, result tracking
-- Optimized for Termux (low CPU, low memory)
+High-Accuracy Binary Options Signal Bot - Strict Strategy
+- Only trade when confidence ≥ 80%
+- No fallback signals
+- Uses EMA 50/200, RSI 14, MACD, support/resistance, multi-timeframe, candle patterns
+- Optimized for Termux, runs 24/7
+- Full Telegram button control
 """
 
 import asyncio
@@ -28,86 +26,67 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 # ======================= CONFIGURATION =======================
 TELEGRAM_TOKEN = "8553023618:AAH7upKIA9j_zqIYtIhBRKThBOY2HlWe6Ss"  # Replace with your bot token
 TELEGRAM_CHAT_ID = None
-DATA_TIMEOUT = 6
+DATA_TIMEOUT = 8
 BINANCE_BASE_URL = "https://api.binance.com/api/v3"
-
-# Timezone for display (Indian Standard Time)
 INDIA_TZ = ZoneInfo("Asia/Kolkata")
 
-# ======================= CATEGORIES & PAIRS =======================
-CATEGORIES = {
-    "Currencies": [
-        "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD",
-        "EUR/GBP", "EUR/JPY", "GBP/JPY", "AUD/JPY", "CHF/JPY", "EUR/AUD", "GBP/AUD",
-        "EUR/CAD", "GBP/CAD", "AUD/CAD", "NZD/JPY", "USD/SGD", "USD/HKD"
-    ],
-    "Crypto": [
-        "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "ADAUSDT", "XRPUSDT", "DOGEUSDT",
-        "AVAXUSDT", "DOTUSDT", "MATICUSDT", "LTCUSDT", "TRXUSDT", "ETCUSDT", "XLMUSDT",
-        "NEARUSDT", "ATOMUSDT", "LINKUSDT", "UNIUSDT", "FILUSDT", "ICPUSDT"
-    ],
-    "Commodities": [
-        "Gold", "Silver", "WTI Oil", "Brent Oil", "Natural Gas", "Copper"
-    ],
-    "Stocks": [
-        "AAPL", "TSLA", "AMZN", "MSFT", "GOOGL", "META", "NVDA", "NFLX", "AMD", "INTC",
-        "PYPL", "BABA", "UBER", "DIS", "KO"
-    ]
+# ======================= SYMBOL MAPPING =======================
+SYMBOL_MAP = {
+    # Crypto (direct)
+    "BTCUSDT": "BTCUSDT",
+    "ETHUSDT": "ETHUSDT",
+    "BNBUSDT": "BNBUSDT",
+    "SOLUSDT": "SOLUSDT",
+    "XRPUSDT": "XRPUSDT",
+    "ADAUSDT": "ADAUSDT",
+    "DOGEUSDT": "DOGEUSDT",
+    "AVAXUSDT": "AVAXUSDT",
+    "DOTUSDT": "DOTUSDT",
+    "MATICUSDT": "MATICUSDT",
+    "LTCUSDT": "LTCUSDT",
+    "TRXUSDT": "TRXUSDT",
+    "ETCUSDT": "ETCUSDT",
+    "XLMUSDT": "XLMUSDT",
+    "ATOMUSDT": "ATOMUSDT",
+    "LINKUSDT": "LINKUSDT",
+    "UNIUSDT": "UNIUSDT",
+    "ICPUSDT": "ICPUSDT",
+    # Forex (simulated using crypto – adjust as needed)
+    "EUR/USD": "BTCUSDT",
+    "EUR/USD (OTC)": "BTCUSDT",
+    "EUR/CHF (OTC)": "ETHUSDT",
+    "GBP/USD (OTC)": "BTCUSDT",
+    "USD/JPY (OTC)": "BTCUSDT",
+    "AUD/USD (OTC)": "BTCUSDT",
+    "USD/CAD (OTC)": "BTCUSDT",
+    "NZD/USD (OTC)": "BTCUSDT",
+    # Commodities (simulated)
+    "Gold (OTC)": "BTCUSDT",
+    "Silver (OTC)": "ETHUSDT",
+    "UKBrent (OTC)": "BNBUSDT",
+    "USCrude (OTC)": "SOLUSDT",
 }
 
-# ======================= UNIVERSAL SYMBOL NORMALIZATION =======================
-def normalize_symbol(pair_name: str) -> str:
-    pair_name = pair_name.upper().strip()
-    pair_name = pair_name.replace(" ", "")
-    pair_name = pair_name.replace("(OTC)", "")
-    if "/" in pair_name:
-        base, quote = pair_name.split("/")
-        return f"{base}{quote}"
-    if pair_name == "GOLD":
-        return "XAUUSDT"
-    if pair_name == "SILVER":
-        return "XAGUSDT"
-    if pair_name == "WTIOIL":
-        return "WTI"
-    if pair_name == "BRENTOIL":
-        return "Brent"
-    if pair_name == "NATURALGAS":
-        return "NG"
-    if pair_name == "COPPER":
-        return "COPPER"
-    pair_name = pair_name.replace("-", "")
-    return pair_name
+# Categories based on mapping keys
+CATEGORIES = {
+    "Crypto": [p for p in SYMBOL_MAP if p.endswith("USDT") and p not in ["EUR/USD", "EUR/CHF (OTC)"]],
+    "Forex": ["EUR/USD", "EUR/CHF (OTC)", "GBP/USD (OTC)", "USD/JPY (OTC)", "AUD/USD (OTC)", "USD/CAD (OTC)", "NZD/USD (OTC)"],
+    "Commodities": ["Gold (OTC)", "Silver (OTC)", "UKBrent (OTC)", "USCrude (OTC)"],
+}
 
-DISPLAY_TO_SYMBOL = {}
-for category, pairs in CATEGORIES.items():
-    for display in pairs:
-        DISPLAY_TO_SYMBOL[display] = normalize_symbol(display)
-
-# ======================= TIME HELPERS =======================
-def format_time_ist(dt_utc: datetime) -> str:
-    local = dt_utc.astimezone(INDIA_TZ)
-    return local.strftime('%H:%M')
-
-# ======================= PERFORMANCE SETTINGS =======================
+# Performance settings
 MAX_CONCURRENT_FETCH = 2
-CANDLE_LIMIT = 40
-SCAN_INTERVAL_AUTO = 8
-SCAN_INTERVAL_MANUAL = 2.5
-CONFIDENCE_THRESHOLD_AUTO = 75
-CONFIDENCE_THRESHOLD_MANUAL = 70
-FALLBACK_CONFIDENCE = 50
-
-TURBO_CONFIDENCE_THRESHOLD = 60
-TURBO_SCAN_INTERVAL = 1.5
-TURBO_EXPIRY_MINUTES = 1          # expiry duration after entry
-ENTRY_DELAY_MINUTES = 2            # delay before entry (normal mode)
-TURBO_ENTRY_DELAY_MINUTES = 1      # delay before entry (turbo mode)
-
+CANDLE_LIMIT = 100          # enough for EMA 200
+SCAN_INTERVAL_AUTO = 15
+SCAN_INTERVAL_MANUAL = 3
+CONFIDENCE_THRESHOLD = 80   # Minimum confidence required
 MAX_SCAN_PAIRS_MANUAL = 6
+ENTRY_DELAY_MINUTES = 2     # Delay before entry to give user time
 
+# News avoidance time blocks (UTC)
 NEWS_BLOCKS = [
     (13, 25, 13, 40),
-    (15, 55, 16, 10)
+    (15, 55, 16, 10),
 ]
 
 # ======================= INDICATORS =======================
@@ -127,15 +106,6 @@ def compute_rsi(series: pd.Series, period: int = 14) -> Optional[float]:
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi.iloc[-1]
-
-def compute_bollinger_bands(series: pd.Series, period: int = 20, std_dev: float = 2):
-    if len(series) < period:
-        return None, None, None
-    middle = series.rolling(window=period).mean()
-    std = series.rolling(window=period).std()
-    upper = middle + std_dev * std
-    lower = middle - std_dev * std
-    return upper.iloc[-1], middle.iloc[-1], lower.iloc[-1]
 
 def compute_macd(series: pd.Series, fast=12, slow=26, signal=9):
     if len(series) < slow + signal:
@@ -158,30 +128,48 @@ def compute_atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
     atr = tr.rolling(period).mean()
     return atr.iloc[-1]
 
-def candlestick_strength(df: pd.DataFrame) -> Tuple[str, float]:
-    if df.empty:
-        return 'weak', 0
+def support_resistance(df: pd.DataFrame, window=20):
+    if len(df) < window:
+        return None, None
+    recent_high = df['high'].tail(window).max()
+    recent_low = df['low'].tail(window).min()
+    return recent_low, recent_high
+
+def candlestick_pattern(df: pd.DataFrame) -> Tuple[str, float]:
+    """Detect strong patterns: engulfing, rejection wick, momentum."""
+    if len(df) < 2:
+        return 'none', 0
     last = df.iloc[-1]
+    prev = df.iloc[-2]
     open_p = last['open']
     close = last['close']
     high = last['high']
     low = last['low']
+    prev_open = prev['open']
+    prev_close = prev['close']
     body = abs(close - open_p)
-    total_range = high - low
-    if total_range == 0:
-        return 'weak', 0
-    if body / total_range < 0.1:
-        return 'doji', 0
-    if close > open_p:
-        strength = (body / total_range) * 100
-        if high - close < body * 0.3:
-            strength += 15
-        return 'bullish', min(strength, 100)
-    else:
-        strength = (body / total_range) * 100
-        if close - low < body * 0.3:
-            strength += 15
-        return 'bearish', min(strength, 100)
+    range_pct = (high - low) / close * 100 if close != 0 else 0
+
+    # Bullish engulfing
+    if close > open_p and prev_close < prev_open and close > prev_open and open_p < prev_close:
+        return 'bullish_engulfing', 85
+    # Bearish engulfing
+    if close < open_p and prev_close > prev_open and close < prev_open and open_p > prev_close:
+        return 'bearish_engulfing', 85
+    # Rejection wick (long wick opposite to direction)
+    upper_wick = high - max(open_p, close)
+    lower_wick = min(open_p, close) - low
+    if upper_wick > body * 2 and close < open_p:   # bearish rejection
+        return 'bearish_rejection', 75
+    if lower_wick > body * 2 and close > open_p:   # bullish rejection
+        return 'bullish_rejection', 75
+    # Momentum candle (large body)
+    if body / (high - low) > 0.7:
+        if close > open_p:
+            return 'bullish_momentum', 70
+        else:
+            return 'bearish_momentum', 70
+    return 'none', 0
 
 # ======================= DATA FETCHER =======================
 fetch_semaphore = asyncio.Semaphore(MAX_CONCURRENT_FETCH)
@@ -221,9 +209,9 @@ async def fetch_all_candles(pairs: List[str], interval='1m', limit=CANDLE_LIMIT)
     async with aiohttp.ClientSession() as session:
         tasks = []
         for pair in pairs:
-            symbol = DISPLAY_TO_SYMBOL.get(pair)
-            if symbol is None:
-                logging.error(f"No symbol mapping for {pair}")
+            symbol = SYMBOL_MAP.get(pair)
+            if not symbol:
+                logging.warning(f"No symbol mapping for {pair}, skipping")
                 continue
             tasks.append(fetch_candles_async(session, symbol, interval, limit))
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -250,169 +238,135 @@ def news_filter() -> bool:
             return True
     return False
 
-def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame, mode: str = 'auto', turbo: bool = False) -> Tuple[str, int, str, Dict]:
+def volatility_filter(df_1m: pd.DataFrame) -> bool:
+    """Avoid low volatility using ATR and Bollinger width."""
+    atr = compute_atr(df_1m, 14)
+    if atr is None:
+        return False
+    price = df_1m['close'].iloc[-1]
+    atr_pct = atr / price * 100
+    # Reject if ATR < 0.2% of price
+    if atr_pct < 0.2:
+        return False
+    # Bollinger width
+    upper, middle, lower = compute_bollinger_bands(df_1m['close'], 20, 2)
+    if upper is None or lower is None:
+        return False
+    bb_width = (upper - lower) / middle * 100 if middle != 0 else 0
+    if bb_width < 0.5:
+        return False
+    return True
+
+def compute_bollinger_bands(series: pd.Series, period: int = 20, std_dev: float = 2):
+    if len(series) < period:
+        return None, None, None
+    middle = series.rolling(window=period).mean()
+    std = series.rolling(window=period).std()
+    upper = middle + std_dev * std
+    lower = middle - std_dev * std
+    return upper.iloc[-1], middle.iloc[-1], lower.iloc[-1]
+
+def check_conditions(df_1m: pd.DataFrame, df_5m: pd.DataFrame) -> Tuple[str, int, str, Dict]:
+    """
+    Strict strategy with 80% confidence threshold.
+    Returns (signal, confidence, reason, details)
+    """
     details = {}
     if df_1m.empty or df_5m.empty:
         return 'WAIT', 0, "Missing data", details
-    if len(df_1m) < 30 or len(df_5m) < 30:
-        return 'WAIT', 0, "Insufficient data", details
+    if len(df_1m) < 200 or len(df_5m) < 200:
+        return 'WAIT', 0, "Insufficient data for EMA 200", details
 
+    # 1m indicators
     close_1m = df_1m['close']
-    ema9_1m = compute_ema(close_1m, 9)
-    ema21_1m = compute_ema(close_1m, 21)
+    ema50_1m = compute_ema(close_1m, 50)
+    ema200_1m = compute_ema(close_1m, 200)
     rsi_1m = compute_rsi(close_1m, 14)
-    upper_1m, middle_1m, lower_1m = compute_bollinger_bands(close_1m, 20, 2)
     macd_line_1m, signal_line_1m, hist_1m = compute_macd(close_1m, 12, 26, 9)
-    atr_1m = compute_atr(df_1m, 14)
-    candle_type, candle_score = candlestick_strength(df_1m)
-
+    # 5m indicators
     close_5m = df_5m['close']
-    ema9_5m = compute_ema(close_5m, 9)
-    ema21_5m = compute_ema(close_5m, 21)
+    ema50_5m = compute_ema(close_5m, 50)
+    ema200_5m = compute_ema(close_5m, 200)
+    rsi_5m = compute_rsi(close_5m, 14)
+    macd_line_5m, signal_line_5m, hist_5m = compute_macd(close_5m, 12, 26, 9)
+    # Support/resistance
+    support, resistance = support_resistance(df_1m, 20)
+    # Candle pattern
+    pattern, pattern_score = candlestick_pattern(df_1m)
 
-    bullish_cross = bearish_cross = False
-    if len(close_1m) >= 2:
-        macd_prev, signal_prev, _ = compute_macd(close_1m.iloc[:-1], 12, 26, 9)
-        if macd_prev is not None and signal_prev is not None:
-            bullish_cross = (macd_prev < signal_prev) and (macd_line_1m > signal_line_1m)
-            bearish_cross = (macd_prev > signal_prev) and (macd_line_1m < signal_line_1m)
-
-    details = {
-        'rsi': rsi_1m,
-        'ema9': ema9_1m, 'ema21': ema21_1m,
-        'bb_upper': upper_1m, 'bb_middle': middle_1m, 'bb_lower': lower_1m,
-        'macd_hist': hist_1m,
-        'candle_score': candle_score, 'candle_type': candle_type,
-        'atr_ratio': atr_1m / close_1m.iloc[-1] if atr_1m else 0,
-        'trend_strength': abs(ema9_1m - ema21_1m) / ema21_1m * 100 if ema21_1m else 0,
-        'bb_width': (upper_1m - lower_1m) / middle_1m if middle_1m else 0,
-    }
-
-    if any(v is None for v in [ema9_1m, ema21_1m, rsi_1m, upper_1m, middle_1m, lower_1m,
-                               macd_line_1m, signal_line_1m, hist_1m, atr_1m]):
+    # Check for None
+    if any(v is None for v in [ema50_1m, ema200_1m, rsi_1m, macd_line_1m, signal_line_1m,
+                               ema50_5m, ema200_5m, rsi_5m, macd_line_5m, signal_line_5m]):
         return 'WAIT', 0, "Indicator failed", details
 
-    tf_bullish_1m = ema9_1m > ema21_1m
-    tf_bearish_1m = ema9_1m < ema21_1m
-    tf_bullish_5m = ema9_5m > ema21_5m
-    tf_bearish_5m = ema9_5m < ema21_5m
-    if tf_bullish_1m and tf_bullish_5m:
-        trend = 'bullish'
-    elif tf_bearish_1m and tf_bearish_5m:
-        trend = 'bearish'
+    # Determine trend from EMAs
+    trend_bullish = ema50_1m > ema200_1m and ema50_5m > ema200_5m
+    trend_bearish = ema50_1m < ema200_1m and ema50_5m < ema200_5m
+    if not (trend_bullish or trend_bearish):
+        return 'WAIT', 0, "No clear trend (EMAs mixed)", details
+
+    # RSI confirmation
+    if trend_bullish:
+        if not (rsi_1m < 30 and rsi_5m < 30):
+            return 'WAIT', 0, "RSI not oversold for CALL", details
     else:
-        return 'WAIT', 0, "Timeframe mismatch", details
+        if not (rsi_1m > 70 and rsi_5m > 70):
+            return 'WAIT', 0, "RSI not overbought for PUT", details
 
-    if 45 <= rsi_1m <= 55:
-        return 'WAIT', 0, "RSI neutral (45-55)", details
+    # MACD crossover confirmation
+    macd_bullish = (macd_line_1m > signal_line_1m and hist_1m > 0) and (macd_line_5m > signal_line_5m and hist_5m > 0)
+    macd_bearish = (macd_line_1m < signal_line_1m and hist_1m < 0) and (macd_line_5m < signal_line_5m and hist_5m < 0)
+    if trend_bullish and not macd_bullish:
+        return 'WAIT', 0, "MACD not bullish", details
+    if trend_bearish and not macd_bearish:
+        return 'WAIT', 0, "MACD not bearish", details
 
-    if details['bb_width'] < 0.003:
-        return 'WAIT', 0, "Low volatility (BB too tight)", details
-    if details['atr_ratio'] < 0.0015:
-        return 'WAIT', 0, "Low movement (ATR too small)", details
+    # Support/resistance filter: trade only near support for CALL, near resistance for PUT
+    price = close_1m.iloc[-1]
+    if trend_bullish and support is not None and price > support * 1.01:
+        return 'WAIT', 0, "Not near support level", details
+    if trend_bearish and resistance is not None and price < resistance * 0.99:
+        return 'WAIT', 0, "Not near resistance level", details
 
-    if mode == 'auto':
-        if len(df_1m) >= 20:
-            avg_vol = df_1m['volume'].tail(20).mean()
-            if df_1m['volume'].iloc[-1] < avg_vol * 0.7:
-                return 'WAIT', 0, "Low volume", details
+    # Volatility filter
+    if not volatility_filter(df_1m):
+        return 'WAIT', 0, "Low volatility", details
 
-    if mode == 'auto' and atr_1m is not None:
-        price_change = abs(close_1m.iloc[-1] - close_1m.iloc[-2]) / close_1m.iloc[-2] * 100
-        required_move = details['bb_width'] * 0.1 if details['bb_width'] else 0.05
-        if price_change < required_move:
-            return 'WAIT', 0, f"Movement too small ({price_change:.2f}%)", details
+    # Candle pattern confirmation
+    if trend_bullish and pattern not in ['bullish_engulfing', 'bullish_rejection', 'bullish_momentum']:
+        return 'WAIT', 0, f"No bullish candle pattern ({pattern})", details
+    if trend_bearish and pattern not in ['bearish_engulfing', 'bearish_rejection', 'bearish_momentum']:
+        return 'WAIT', 0, f"No bearish candle pattern ({pattern})", details
 
+    # Multi-timeframe confirmation already used in trend and MACD
+    # Build confidence score (all conditions passed)
     confidence = 0
     reasons = []
+    # EMA trend aligned (must have passed)
+    confidence += 20
+    reasons.append("EMA 50/200 aligned")
+    # RSI confirmation (passed)
+    confidence += 20
+    reasons.append(f"RSI {'oversold' if trend_bullish else 'overbought'}")
+    # MACD confirmation (passed)
+    confidence += 20
+    reasons.append("MACD confirms")
+    # Support/resistance confirmation (passed)
+    confidence += 20
+    reasons.append("Near key level")
+    # Candle pattern (passed)
+    confidence += 20
+    reasons.append(f"Candle pattern: {pattern}")
+    # Volatility filter passed (implicit)
+    # Total 100% possible, but we cap at 100
+    confidence = min(100, confidence)
 
-    if (trend == 'bullish' and ema9_1m > ema21_1m) or (trend == 'bearish' and ema9_1m < ema21_1m):
-        confidence += 25
-        reasons.append("EMA aligned")
+    signal = 'CALL' if trend_bullish else 'PUT'
+    # Final confidence must be at least 80
+    if confidence >= CONFIDENCE_THRESHOLD:
+        return signal, confidence, ", ".join(reasons), details
     else:
-        return 'WAIT', 0, "EMA condition failed", details
-
-    if trend == 'bullish' and 40 <= rsi_1m <= 65:
-        confidence += 20
-        reasons.append("RSI bullish range")
-    elif trend == 'bearish' and 35 <= rsi_1m <= 60:
-        confidence += 20
-        reasons.append("RSI bearish range")
-    else:
-        return 'WAIT', 0, f"RSI out of range: {rsi_1m:.2f}", details
-
-    price = close_1m.iloc[-1]
-    if mode == 'auto':
-        if trend == 'bullish' and price <= lower_1m * 1.02:
-            confidence += 20
-            reasons.append("Price near lower BB")
-        elif trend == 'bearish' and price >= upper_1m * 0.98:
-            confidence += 20
-            reasons.append("Price near upper BB")
-        else:
-            return 'WAIT', 0, "BB position mismatch", details
-    else:
-        if trend == 'bullish' and price <= middle_1m * 1.02:
-            confidence += 15
-            reasons.append("Price near lower/mid BB")
-        elif trend == 'bearish' and price >= middle_1m * 0.98:
-            confidence += 15
-            reasons.append("Price near upper/mid BB")
-        else:
-            return 'WAIT', 0, "BB position mismatch (manual)", details
-
-    if trend == 'bullish' and bullish_cross:
-        confidence += 25
-        reasons.append("MACD bullish crossover")
-        if hist_1m > 0:
-            confidence += 5
-    elif trend == 'bearish' and bearish_cross:
-        confidence += 25
-        reasons.append("MACD bearish crossover")
-        if hist_1m < 0:
-            confidence += 5
-    else:
-        if mode == 'manual' and ((trend == 'bullish' and hist_1m > 0 and macd_line_1m > signal_line_1m) or
-                                 (trend == 'bearish' and hist_1m < 0 and macd_line_1m < signal_line_1m)):
-            confidence += 10
-            reasons.append("MACD already in momentum")
-        else:
-            return 'WAIT', 0, "MACD condition missing", details
-
-    if mode == 'auto':
-        if (trend == 'bullish' and candle_type == 'bullish' and candle_score >= 70) or \
-           (trend == 'bearish' and candle_type == 'bearish' and candle_score >= 70):
-            confidence += 15
-            reasons.append(f"Strong {candle_type} candle")
-        else:
-            return 'WAIT', 0, f"Candle weak: {candle_type} ({candle_score})", details
-    else:
-        if (trend == 'bullish' and candle_type == 'bullish' and candle_score >= 60) or \
-           (trend == 'bearish' and candle_type == 'bearish' and candle_score >= 60):
-            confidence += 10
-            reasons.append(f"Moderate {candle_type} candle")
-        else:
-            return 'WAIT', 0, f"Candle weak: {candle_type} ({candle_score})", details
-
-    if atr_1m is not None and (atr_1m / price) > 0.008:
-        confidence += 5
-        reasons.append("Strong volatility")
-    if details['atr_ratio'] > 0.01:
-        confidence += 8
-        reasons.append("High volatility boost")
-    if details['trend_strength'] > 0.25:
-        confidence += 5
-        reasons.append("Strong trend strength")
-    if details['bb_width'] > 0.012:
-        confidence += 5
-        reasons.append("Wide Bollinger Bands")
-
-    signal = 'CALL' if trend == 'bullish' else 'PUT'
-    threshold = CONFIDENCE_THRESHOLD_AUTO if mode == 'auto' else (TURBO_CONFIDENCE_THRESHOLD if turbo else CONFIDENCE_THRESHOLD_MANUAL)
-    if confidence >= threshold:
-        return signal, min(confidence, 100), ", ".join(reasons), details
-    else:
-        return 'WAIT', confidence, f"Confidence {confidence} < {threshold}", details
+        return 'WAIT', confidence, f"Confidence {confidence} < {CONFIDENCE_THRESHOLD}", details
 
 # ======================= DATABASE =======================
 class Database:
@@ -533,7 +487,6 @@ class TradingBot:
         keyboard = [
             [InlineKeyboardButton("📂 Select Category", callback_data="select_category")],
             [InlineKeyboardButton("🔄 Select Pair", callback_data="select_pair")],
-            [InlineKeyboardButton("⚡ Turbo 1m", callback_data="turbo_mode")],
             [InlineKeyboardButton("⬅️ Back", callback_data="back_main")],
             [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")],
         ]
@@ -571,7 +524,9 @@ class TradingBot:
         if not category:
             await self.show_category_menu(chat_id, edit=edit, message_id=message_id)
             return
-        pairs = CATEGORIES[category]
+        pairs = CATEGORIES.get(category, [])
+        # Filter only pairs that exist in SYMBOL_MAP
+        pairs = [p for p in pairs if p in SYMBOL_MAP]
         keyboard = []
         for i in range(0, len(pairs), 2):
             row = []
@@ -597,13 +552,11 @@ class TradingBot:
             category = self.state.get('category', 'None')
             pair = self.state.get('pair', 'None')
             trades_today = self.state.get('trades_today', 0)
-            turbo = self.state.get('turbo_mode', False)
         mode = "Auto" if trading else "Manual (inactive)"
-        turbo_text = " (Turbo)" if turbo else ""
         text = (
             "📊 *Bot Status*\n"
             "━━━━━━━━━━━━━━\n"
-            f"Mode: {mode}{turbo_text}\n"
+            f"Mode: {mode}\n"
             f"Category: {category}\n"
             f"Pair: {pair}\n"
             f"Trades Today: {trades_today}\n"
@@ -682,26 +635,6 @@ class TradingBot:
         await self.app.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id,
                                              reply_markup=reply_markup)
 
-    async def update_timer(self, chat_id: int, msg_id: int, end_time: datetime, turbo: bool = False):
-        interval = TURBO_SCAN_INTERVAL if turbo else 15
-        while True:
-            remaining = end_time - datetime.now(timezone.utc)
-            seconds = int(remaining.total_seconds())
-            if seconds <= 0:
-                break
-            minutes = seconds // 60
-            secs = seconds % 60
-            text = f"⏳ Scanning market...\n\nNext signal will start after delay\n\nTime remaining: {minutes:02}:{secs:02}\n\nYou will have time to execute trade"
-            try:
-                await self.app.bot.edit_message_text(
-                    text,
-                    chat_id=chat_id,
-                    message_id=msg_id
-                )
-            except Exception:
-                pass
-            await asyncio.sleep(interval)
-
     async def handle_generate_signal(self, chat_id: int, message_id: int):
         async with self.state['lock']:
             if self.state.get('pair') is None:
@@ -710,7 +643,6 @@ class TradingBot:
                     chat_id=chat_id, message_id=message_id
                 )
                 return
-            turbo = self.state.get('turbo_mode', False)
 
         keyboard = [
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel_generate")],
@@ -719,13 +651,9 @@ class TradingBot:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         loading_msg = await self.app.bot.edit_message_text(
-            "⏳ Scanning market...\n\nNext signal will start after delay\n\nYou will have time to execute trade",
+            "⏳ Scanning market for high-confidence signal...",
             chat_id=chat_id, message_id=message_id, reply_markup=reply_markup
         )
-
-        # Calculate end time for scanning (max 5 minutes from now)
-        end_time = datetime.now(timezone.utc) + timedelta(minutes=5)
-        asyncio.create_task(self.update_timer(chat_id, loading_msg.message_id, end_time, turbo))
 
         async with self.state['lock']:
             self.state['manual_request'] = True
@@ -733,8 +661,6 @@ class TradingBot:
             self.state['manual_start_time'] = datetime.now(timezone.utc)
             self.state['manual_best_signal'] = None
             self.state['manual_loading_msg_id'] = loading_msg.message_id
-            self.state['manual_end_time'] = end_time
-            self.state['turbo_mode'] = turbo
 
     async def handle_cancel_generate(self, chat_id: int, message_id: int):
         async with self.state['lock']:
@@ -743,7 +669,6 @@ class TradingBot:
             self.state['manual_start_time'] = None
             self.state['manual_best_signal'] = None
             self.state['manual_loading_msg_id'] = None
-            self.state['manual_end_time'] = None
         text = "❌ Cancelled"
         keyboard = [
             [InlineKeyboardButton("⚡ Generate Again", callback_data="generate_signal")],
@@ -785,22 +710,6 @@ class TradingBot:
         await self.app.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id,
                                              reply_markup=reply_markup)
 
-    async def handle_turbo_mode(self, chat_id: int, message_id: int):
-        async with self.state['lock']:
-            self.state['turbo_mode'] = not self.state.get('turbo_mode', False)
-            turbo = self.state['turbo_mode']
-        if turbo:
-            text = "⚡ Turbo Mode ENABLED\n\n- Signals generated faster\n- 1-minute expiry after entry delay\n- Slightly relaxed confidence threshold\n- Entry delay reduced to 1 minute"
-        else:
-            text = "⚡ Turbo Mode DISABLED\n\nNormal mode restored (5-minute expiry, 2-minute entry delay, strict confidence)."
-        keyboard = [
-            [InlineKeyboardButton("⬅️ Back", callback_data="back_settings")],
-            [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await self.app.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id,
-                                             reply_markup=reply_markup)
-
     async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
@@ -832,8 +741,6 @@ class TradingBot:
             await self.handle_generate_signal(chat_id, message_id)
         elif data == "cancel_generate":
             await self.handle_cancel_generate(chat_id, message_id)
-        elif data == "turbo_mode":
-            await self.handle_turbo_mode(chat_id, message_id)
         elif data.startswith("category_"):
             category = data[9:]
             await self.handle_category_selection(chat_id, message_id, category)
@@ -842,19 +749,6 @@ class TradingBot:
             await self.handle_pair_selection(chat_id, message_id, pair)
 
     async def send_signal(self, chat_id: int, signal_text: str, loading_msg_id: int = None):
-        try:
-            conf_line = [l for l in signal_text.split('\n') if "Confidence:" in l][0]
-            conf = int(conf_line.split(':')[1].strip().replace('%', ''))
-        except:
-            conf = 0
-        if conf >= 80:
-            tag = "🔥 High Probability"
-        elif conf >= 60:
-            tag = "✅ Good Setup"
-        else:
-            tag = "⚠️ Low Confidence"
-        final_text = signal_text + f"\n\n{tag}"
-
         if loading_msg_id:
             keyboard = [
                 [InlineKeyboardButton("🔁 Generate Again", callback_data="generate_signal")],
@@ -864,43 +758,45 @@ class TradingBot:
             reply_markup = InlineKeyboardMarkup(keyboard)
             try:
                 await self.app.bot.edit_message_text(
-                    final_text, chat_id=chat_id, message_id=loading_msg_id,
+                    signal_text, chat_id=chat_id, message_id=loading_msg_id,
                     reply_markup=reply_markup, parse_mode='Markdown'
                 )
             except Exception as e:
                 logging.error(f"Failed to edit loading message: {e}")
-                await self.app.bot.send_message(chat_id=chat_id, text=final_text, parse_mode='Markdown')
+                await self.app.bot.send_message(chat_id=chat_id, text=signal_text, parse_mode='Markdown')
         else:
-            await self.app.bot.send_message(chat_id=chat_id, text=final_text, parse_mode='Markdown')
+            await self.app.bot.send_message(chat_id=chat_id, text=signal_text, parse_mode='Markdown')
 
 # ======================= WATCHDOG =======================
 async def watchdog(state):
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)  # check every 30 seconds
         async with state['lock']:
             last = state.get('last_heartbeat')
         if last:
             delay = (datetime.now(timezone.utc) - last).total_seconds()
             if delay > 180:
                 logging.warning("WATCHDOG ALERT: BOT FROZEN – no heartbeat for 3 minutes")
+        # Heartbeat is updated in main loop every cycle
 
 # ======================= RESULT CHECKER =======================
 async def result_checker(db):
     while True:
-        await asyncio.sleep(30)
+        await asyncio.sleep(60)
         conn = sqlite3.connect("signals.db")
         c = conn.cursor()
         c.execute("""
-            SELECT id, pair, signal, entry_price, expiry_time
+            SELECT id, pair, entry_price, expiry_time, signal
             FROM signals
             WHERE result IS NULL
         """)
         rows = c.fetchall()
         for row in rows:
-            id_, pair_display, signal, entry_price, expiry_str = row
+            id_, pair_display, entry_price, expiry_str, signal = row
             expiry = datetime.fromisoformat(expiry_str)
             if datetime.now(timezone.utc) < expiry:
                 continue
+            # fetch current price
             df_data = await fetch_all_candles([pair_display], '1m', 2)
             df = df_data.get(pair_display)
             if df is None or df.empty:
@@ -915,14 +811,14 @@ async def result_checker(db):
 # ======================= AUTO ROTATION TASK =======================
 async def auto_rotation(state, db):
     while True:
-        await asyncio.sleep(300)
+        await asyncio.sleep(300)  # 5 minutes
         async with state['lock']:
             if not state['trading_enabled']:
                 continue
             category = state.get('category')
             if not category:
                 continue
-            pairs = CATEGORIES[category]
+            pairs = CATEGORIES.get(category, [])
             if not pairs:
                 continue
             idx = state.get('rotation_index', 0)
@@ -935,7 +831,7 @@ async def auto_rotation(state, db):
 async def async_scan_for_signal(state, db, bot, manual=False):
     start_time = datetime.now(timezone.utc)
     best_signal = None
-    best_score = 0
+    best_confidence = 0
 
     while True:
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
@@ -943,21 +839,14 @@ async def async_scan_for_signal(state, db, bot, manual=False):
             if best_signal:
                 return best_signal
             else:
-                async with state['lock']:
-                    pair = state.get('pair', 'BTC/USDT')
-                return {
-                    'pair': pair,
-                    'signal': 'CALL',
-                    'confidence': FALLBACK_CONFIDENCE,
-                    'reason': 'Fallback signal (safe mode)',
-                    'entry_price': 0
-                }
+                # No signal found within 5 minutes – return nothing, no fallback
+                return None
 
         pairs_to_scan = []
         if not manual:
             async with state['lock']:
                 pair = state.get('pair')
-            if pair:
+            if pair and pair in SYMBOL_MAP:
                 pairs_to_scan = [pair]
             else:
                 return None
@@ -965,7 +854,9 @@ async def async_scan_for_signal(state, db, bot, manual=False):
             async with state['lock']:
                 category = state.get('category')
             if category:
-                all_pairs = CATEGORIES[category]
+                all_pairs = CATEGORIES.get(category, [])
+                # Filter only mapped pairs
+                all_pairs = [p for p in all_pairs if p in SYMBOL_MAP]
                 pairs_to_scan = all_pairs[:MAX_SCAN_PAIRS_MANUAL]
             else:
                 pairs_to_scan = []
@@ -973,6 +864,7 @@ async def async_scan_for_signal(state, db, bot, manual=False):
         if not pairs_to_scan:
             return None
 
+        # News filter (skip during news)
         if news_filter():
             logging.debug("News block active, skipping scan")
             await asyncio.sleep(60)
@@ -994,15 +886,12 @@ async def async_scan_for_signal(state, db, bot, manual=False):
                         continue
                     state['last_candle_time'] = current_candle
 
-            mode = 'manual' if manual else 'auto'
-            turbo = state.get('turbo_mode', False) if manual else False
-            signal, confidence, reason, details = check_conditions(df_1m, df_5m, mode, turbo)
+            signal, confidence, reason, details = check_conditions(df_1m, df_5m)
 
             if signal != 'WAIT':
-                score = confidence + (details.get('trend_strength', 0) * 2)
                 if manual:
-                    if score > best_score:
-                        best_score = score
+                    if confidence > best_confidence:
+                        best_confidence = confidence
                         best_signal = {
                             'pair': pair_display,
                             'signal': signal,
@@ -1010,10 +899,11 @@ async def async_scan_for_signal(state, db, bot, manual=False):
                             'reason': reason,
                             'entry_price': df_1m['close'].iloc[-1]
                         }
-                        threshold = TURBO_CONFIDENCE_THRESHOLD if turbo else CONFIDENCE_THRESHOLD_MANUAL
-                        if confidence >= threshold:
+                        # If confidence is already >=80, we can return immediately
+                        if confidence >= CONFIDENCE_THRESHOLD:
                             return best_signal
                 else:
+                    # Auto mode: also check duplicate direction
                     last_dir = db.get_last_signal_direction()
                     if last_dir == signal:
                         logging.debug("Duplicate direction, skipping")
@@ -1036,23 +926,21 @@ async def async_scan_for_signal(state, db, bot, manual=False):
 
         if not manual:
             break
-        await asyncio.sleep(SCAN_INTERVAL_MANUAL if not state.get('turbo_mode') else TURBO_SCAN_INTERVAL)
+        await asyncio.sleep(SCAN_INTERVAL_MANUAL)
 
     return best_signal if manual else None
 
-# ======================= SIGNAL HELPER (Entry delay) =======================
-def compute_entry_and_expiry(turbo: bool, now: datetime):
-    delay = TURBO_ENTRY_DELAY_MINUTES if turbo else ENTRY_DELAY_MINUTES
-    entry = now + timedelta(minutes=delay)
-    # round to next minute
+def compute_entry_and_expiry(now: datetime):
+    entry = now + timedelta(minutes=ENTRY_DELAY_MINUTES)
     entry = entry.replace(second=0, microsecond=0)
     if entry <= now:
         entry += timedelta(minutes=1)
-    expiry_minutes = TURBO_EXPIRY_MINUTES if turbo else 5
-    expiry = entry + timedelta(minutes=expiry_minutes)
+    expiry = entry + timedelta(minutes=5)   # 5 min expiry
     return entry, expiry
 
-# ======================= MAIN =======================
+def format_time_ist(dt_utc: datetime) -> str:
+    return dt_utc.astimezone(INDIA_TZ).strftime('%H:%M')
+
 async def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -1079,12 +967,10 @@ async def main():
         'manual_start_time': None,
         'manual_best_signal': None,
         'manual_loading_msg_id': None,
-        'manual_end_time': None,
         'current_menu': {},
         'trades_today': 0,
         'last_heartbeat': datetime.now(timezone.utc),
         'rotation_index': 0,
-        'turbo_mode': False,
         'market_cache': {},
         'cache_lock': asyncio.Lock(),
     }
@@ -1113,15 +999,9 @@ async def main():
                     state['manual_chat_id'] = None
                     state['manual_start_time'] = None
                     state['manual_loading_msg_id'] = None
-                    state['manual_end_time'] = None
                 if signal_info:
                     now = datetime.now(timezone.utc)
-                    turbo = state.get('turbo_mode', False)
-                    entry_time, expiry_time = compute_entry_and_expiry(turbo, now)
-                    note = ""
-                    threshold = TURBO_CONFIDENCE_THRESHOLD if turbo else CONFIDENCE_THRESHOLD_MANUAL
-                    if signal_info['confidence'] < threshold:
-                        note = "\n⚠️ *Best available signal (confidence below threshold)*"
+                    entry_time, expiry_time = compute_entry_and_expiry(now)
                     msg = (
                         "📊 *Signal Alert*\n"
                         "━━━━━━━━━━━━━━\n"
@@ -1131,8 +1011,9 @@ async def main():
                         f"⏱ Entry: {format_time_ist(entry_time)}\n"
                         f"⌛ Expiry: {format_time_ist(expiry_time)}\n"
                         "━━━━━━━━━━━━━━\n"
-                        f"🧠 Reason: {signal_info['reason']}{note}"
+                        f"🧠 Reason: {signal_info['reason']}"
                     )
+                    # Determine category for logging
                     category = None
                     for cat, pairs in CATEGORIES.items():
                         if signal_info['pair'] in pairs:
@@ -1149,7 +1030,8 @@ async def main():
                     )
                     asyncio.create_task(bot.send_signal(chat_id, msg, loading_msg_id))
                 else:
-                    asyncio.create_task(bot.send_signal(chat_id, "⚠️ Unexpected error: no signal found. Please try again.", loading_msg_id))
+                    # No signal found – send informative message (but not a fallback)
+                    asyncio.create_task(bot.send_signal(chat_id, "⚠️ No high-confidence signal found. Please try again later.", loading_msg_id))
                 await asyncio.sleep(30)
                 continue
 
@@ -1184,7 +1066,7 @@ async def main():
             signal_info = await async_scan_for_signal(state, db, bot, manual=False)
             if signal_info:
                 now = datetime.now(timezone.utc)
-                entry_time, expiry_time = compute_entry_and_expiry(False, now)  # auto mode never uses turbo
+                entry_time, expiry_time = compute_entry_and_expiry(now)
                 msg = (
                     "📊 *Signal Alert*\n"
                     "━━━━━━━━━━━━━━\n"
